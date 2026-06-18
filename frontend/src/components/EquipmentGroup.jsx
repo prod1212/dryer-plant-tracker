@@ -49,9 +49,13 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
       >
         <span style={{ color: 'var(--text3)', fontSize: 12 }}>{expanded ? '▼' : '▶'}</span>
         <span style={{ fontWeight: 700, fontSize: 13, flex: 1, color: 'var(--accent2)' }}>{group.name}</span>
-        <span style={{ fontSize: 11, color: 'var(--text3)' }}>{group.items.length} items · {fmt$(totalCost)}</span>
-        <button className="btn-icon" onClick={e => { e.stopPropagation(); onEdit() }}>✏️</button>
-        <button className="btn-icon" onClick={e => { e.stopPropagation(); onDelete() }}>🗑️</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <span style={{ fontSize: 11, color: 'var(--text3)', position: 'relative', top: 1 }}>{group.items.length} items · {fmt$(totalCost)}</span>
+          <div style={{ display: 'flex' }}>
+            <button className="btn-icon" onClick={e => { e.stopPropagation(); onEdit() }}>✏️</button>
+            <button className="btn-icon" onClick={e => { e.stopPropagation(); onDelete() }} style={{ marginLeft: -9 }}>🗑️</button>
+          </div>
+        </div>
       </div>
 
       {/* Line items table */}

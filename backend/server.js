@@ -10,11 +10,35 @@ const DB_PATH = path.join(__dirname, 'tracker.json');
 app.use(cors());
 app.use(express.json());
 
+// ─── FUTURE COMMIT — AI COST LIBRARY & DYNAMIC MARGIN ───────────────────────
+// A `components` table stores every typical line item (description, category,
+// historical avg cost, % of typical job value) built from past jobs.
+// When a line item is saved, an AI matching call compares its description to
+// the library and pre-fills budgeted_cost automatically. User confirms/overrides.
+// Projected margin = (Sell Price - sum of actuals + remaining budgeted costs)
+//                    / Sell Price × 100
+// Color-coding on the card activates once enough budgeted costs are populated.
+// Library improves over time as actual PO costs feed back into historical averages.
+// IN THE MEANTIME: user sets a static target margin % on the job. Equipment budget
+// is calculated from sell price and shown in the drawer as a reference number.
+// Card shows margin as the target (intent), not a live forecast.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── COMMIT 7 — FILE STORAGE DECISION ────────────────────────────────────────
+// Files (attachments, drawings, RFQs, quotes, mass balances) live on the SERVER
+// FILESYSTEM, organized by job: uploads/TI-1001/filename.pdf
+// Metadata (filename, size, job_id, upload_date, path) lives in the database.
+// Backend serves files via /api/files/:id endpoints (upload, download, delete).
+// Users never leave the app — no SharePoint, no external tools.
+// File panel lives inside the job drawer, with drag-and-drop upload support.
+// On-prem server hosting is the target deployment environment.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── JSON FILE STORE ──────────────────────────────────────────────────────────
 
 function loadDb() {
   if (!fs.existsSync(DB_PATH)) {
-    return { jobs: [], groups: [], items: [], milestones: [], seq: { jobs: 1, groups: 1, items: 1, milestones: 1 } };
+    return { jobs: [], groups: [], items: [], milestones: [], contacts: [], seq: { jobs: 1, groups: 1, items: 1, milestones: 1, contacts: 1 } };
   }
   return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
 }
@@ -48,8 +72,21 @@ function calcCompletion(items) {
 }
 
 function getJobWithStats(db, jobId) {
-  const job = db.jobs.find(j => j.id === jobId);
-  if (!job) return null;
+  const raw = db.jobs.find(j => j.id === jobId);
+  if (!raw) return null;
+
+  // Supply defaults for fields absent in records created before they were added
+  const job = {
+    project_type: 'other',
+    job_status: 'lead',
+    customer_po: '',
+    revision: '',
+    estimated_install: 0,
+    outbound_freight: 0,
+    collected: 0,
+    target_margin: 35,
+    ...raw,
+  };
 
   const groups = db.groups
     .filter(g => g.job_id === jobId)
@@ -64,10 +101,15 @@ function getJobWithStats(db, jobId) {
     .filter(m => m.job_id === jobId)
     .sort((a, b) => a.order_index - b.order_index || a.id - b.id);
 
+  const contacts = (db.contacts || [])
+    .filter(c => c.job_id === jobId)
+    .sort((a, b) => a.id - b.id);
+
   return {
     ...job,
     groups,
     milestones,
+    contacts,
     stats: {
       totalItems: allItems.length,
       poCount: allItems.filter(i => i.po_number).length,
@@ -91,12 +133,14 @@ app.get('/api/jobs', (req, res) => {
 
 app.post('/api/jobs', (req, res) => {
   const db = loadDb();
-  const { job_number, customer, revision, pcr, project_sell, estimated_install, outbound_freight, notes } = req.body;
+  const { job_number, customer, revision, pcr, project_type, job_status, customer_po, project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
   const job = {
     id: nextId(db, 'jobs'), job_number, customer: customer || '', revision: revision || '',
-    pcr: pcr || '', project_sell: project_sell || 0, estimated_install: estimated_install || 0,
-    outbound_freight: outbound_freight || 0, notes: notes || '',
-    created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    pcr: pcr || '', project_type: project_type || 'other', job_status: job_status || 'lead',
+    customer_po: customer_po || '', project_sell: project_sell || 0,
+    estimated_install: estimated_install || 0, outbound_freight: outbound_freight || 0,
+    collected: collected || 0, target_margin: target_margin || 35,
+    notes: notes || '', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   };
   db.jobs.push(job);
   saveDb(db);
@@ -115,10 +159,13 @@ app.put('/api/jobs/:id', (req, res) => {
   const id = Number(req.params.id);
   const idx = db.jobs.findIndex(j => j.id === id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const { job_number, customer, revision, pcr, project_sell, estimated_install, outbound_freight, notes } = req.body;
+  const { job_number, customer, revision, pcr, project_type, job_status, customer_po, project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
   db.jobs[idx] = { ...db.jobs[idx], job_number, customer: customer || '', revision: revision || '',
-    pcr: pcr || '', project_sell: project_sell || 0, estimated_install: estimated_install || 0,
-    outbound_freight: outbound_freight || 0, notes: notes || '', updated_at: new Date().toISOString() };
+    pcr: pcr || '', project_type: project_type || 'other', job_status: job_status || 'lead',
+    customer_po: customer_po || '', project_sell: project_sell || 0,
+    estimated_install: estimated_install || 0, outbound_freight: outbound_freight || 0,
+    collected: collected || 0, target_margin: target_margin || 35,
+    notes: notes || '', updated_at: new Date().toISOString() };
   saveDb(db);
   res.json(getJobWithStats(db, id));
 });
@@ -130,7 +177,48 @@ app.delete('/api/jobs/:id', (req, res) => {
   db.items = db.items.filter(i => !groupIds.includes(i.group_id));
   db.milestones = db.milestones.filter(m => m.job_id !== id);
   db.groups = db.groups.filter(g => g.job_id !== id);
+  if (!db.contacts) db.contacts = [];
+  db.contacts = db.contacts.filter(c => c.job_id !== id);
   db.jobs = db.jobs.filter(j => j.id !== id);
+  saveDb(db);
+  res.json({ ok: true });
+});
+
+// ─── CONTACTS ─────────────────────────────────────────────────────────────────
+
+app.post('/api/jobs/:jobId/contacts', (req, res) => {
+  const db = loadDb();
+  if (!db.contacts) db.contacts = [];
+  if (!db.seq.contacts) db.seq.contacts = 1;
+  const { name, role, phone, email } = req.body;
+  const contact = {
+    id: nextId(db, 'contacts'),
+    job_id: Number(req.params.jobId),
+    name: name || '', role: role || 'other',
+    phone: phone || '', email: email || '',
+    created_at: new Date().toISOString(),
+  };
+  db.contacts.push(contact);
+  saveDb(db);
+  res.json(contact);
+});
+
+app.put('/api/contacts/:id', (req, res) => {
+  const db = loadDb();
+  if (!db.contacts) db.contacts = [];
+  const id = Number(req.params.id);
+  const idx = db.contacts.findIndex(c => c.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const { name, role, phone, email } = req.body;
+  db.contacts[idx] = { ...db.contacts[idx], name, role, phone: phone || '', email: email || '' };
+  saveDb(db);
+  res.json(db.contacts[idx]);
+});
+
+app.delete('/api/contacts/:id', (req, res) => {
+  const db = loadDb();
+  if (!db.contacts) db.contacts = [];
+  db.contacts = db.contacts.filter(c => c.id !== Number(req.params.id));
   saveDb(db);
   res.json({ ok: true });
 });

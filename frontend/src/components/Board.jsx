@@ -8,7 +8,7 @@ const COLUMNS = [
   { pct: 100, label: '100%', sub: 'Complete' },
 ]
 
-export default function Board({ jobs, onEditJob, onDeleteJob, onRefresh }) {
+export default function Board({ jobs, onEditJob, onDeleteJob, onRefresh, onOpenDrawer }) {
   return (
     <div style={{
       display: 'flex', gap: 0, flex: 1, overflow: 'hidden',
@@ -60,6 +60,7 @@ export default function Board({ jobs, onEditJob, onDeleteJob, onRefresh }) {
                     onEdit={() => onEditJob(job)}
                     onDelete={() => onDeleteJob(job.id)}
                     onRefresh={onRefresh}
+                    onOpenDrawer={() => onOpenDrawer(job)}
                   />
                 ))
               )}
@@ -80,9 +81,9 @@ function ColumnProgress({ pct, color }) {
 }
 
 function colColor(pct) {
-  if (pct === 0) return '#475569'
-  if (pct === 25) return '#3b82f6'
-  if (pct === 50) return '#eab308'
-  if (pct === 75) return '#f97316'
-  return '#22c55e'
+  if (pct === 0)   return '#64748b'  // slate   — clear of all type colors
+  if (pct === 25)  return '#06b6d4'  // cyan    — clear of blue (aggregate)
+  if (pct === 50)  return '#eab308'  // amber   — no conflict
+  if (pct === 75)  return '#e879f9'  // fuchsia — clear of orange (frac sand)
+  return '#34d399'                   // emerald — lighter than soil green (#22c55e)
 }

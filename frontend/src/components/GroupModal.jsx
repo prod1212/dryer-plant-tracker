@@ -17,7 +17,6 @@ const COMMON_GROUPS = [
 export default function GroupModal({ group, onSave, onClose }) {
   const [form, setForm] = useState({
     name: group?.name || '',
-    order_index: group?.order_index || 0,
   })
 
   return (
@@ -39,16 +38,6 @@ export default function GroupModal({ group, onSave, onClose }) {
         <datalist id="group-suggestions">
           {COMMON_GROUPS.map(g => <option key={g} value={g} />)}
         </datalist>
-      </div>
-      <div style={{ marginTop: 12 }}>
-        <label>Display Order</label>
-        <input
-          type="number"
-          value={form.order_index}
-          onChange={e => setForm(f => ({ ...f, order_index: Number(e.target.value) }))}
-          placeholder="0"
-          style={{ width: 80 }}
-        />
       </div>
     </Modal>
   )

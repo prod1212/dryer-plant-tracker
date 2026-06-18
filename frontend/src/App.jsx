@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Board from './components/Board.jsx'
 import JobModal from './components/JobModal.jsx'
+import JobDrawer from './components/JobDrawer.jsx'
 
 const API = '/api'
 
@@ -9,6 +10,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [showJobModal, setShowJobModal] = useState(false)
   const [editingJob, setEditingJob] = useState(null)
+  const [drawerJobId, setDrawerJobId] = useState(null)
 
   const fetchJobs = useCallback(async () => {
     const res = await fetch(`${API}/jobs`)
@@ -49,6 +51,8 @@ export default function App() {
     setShowJobModal(true)
   }
 
+  const drawerJob = drawerJobId ? jobs.find(j => j.id === drawerJobId) : null
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <header style={{
@@ -81,6 +85,7 @@ export default function App() {
           onEditJob={handleEditJob}
           onDeleteJob={handleDeleteJob}
           onRefresh={fetchJobs}
+          onOpenDrawer={(job) => setDrawerJobId(job.id)}
         />
       )}
 
@@ -89,6 +94,22 @@ export default function App() {
           job={editingJob}
           onSave={handleSaveJob}
           onClose={() => { setShowJobModal(false); setEditingJob(null) }}
+        />
+      )}
+
+      {drawerJob && (
+        <JobDrawer
+          job={drawerJob}
+          onClose={() => setDrawerJobId(null)}
+          onEdit={() => {
+            handleEditJob(drawerJob)
+            setDrawerJobId(null)
+          }}
+          onDelete={() => {
+            handleDeleteJob(drawerJob.id)
+            setDrawerJobId(null)
+          }}
+          onRefresh={fetchJobs}
         />
       )}
     </div>
