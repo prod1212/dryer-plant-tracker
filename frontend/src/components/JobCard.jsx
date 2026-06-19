@@ -109,11 +109,9 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
             <div style={{ fontSize: 13, color: 'var(--text2)', fontWeight: 500, marginTop: 4 }}>
               {job.customer || '—'}
             </div>
-            {(job.revision || job.customer_po) && (
+            {job.revision && (
               <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
-                {job.revision && <span>Rev: {job.revision}</span>}
-                {job.revision && job.customer_po && <span> · </span>}
-                {job.customer_po && <span>Cust PO: {job.customer_po}</span>}
+                <span>Rev: {job.revision}</span>
               </div>
             )}
           </div>

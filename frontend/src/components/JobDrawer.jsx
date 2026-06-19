@@ -105,11 +105,9 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
                 <span className={`tag tag-${stats.completion}`}>{stats.completion}% Complete</span>
               </div>
               <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', marginTop: 4 }}>{job.customer || '—'}</div>
-              {(job.revision || job.customer_po) && (
+              {job.revision && (
                 <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
-                  {job.revision && <span>Rev: {job.revision}</span>}
-                  {job.revision && job.customer_po && <span> · </span>}
-                  {job.customer_po && <span>Customer PO: {job.customer_po}</span>}
+                  <span>Rev: {job.revision}</span>
                 </div>
               )}
             </div>
@@ -123,6 +121,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
           {/* Stats strip */}
           <div style={{ display: 'flex', gap: 24, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
             {job.project_sell > 0 && <BigStat label="Sell Price" value={fmt(job.project_sell)} color={typeConfig.color} />}
+            {job.customer_po && <BigStat label="Cust PO" value={job.customer_po} />}
             <BigStat label="POs Issued" value={stats.poCount} />
             {job.collected > 0 && <BigStat label="Collected" value={fmt(job.collected)} color="var(--accent)" />}
             {job.project_sell > 0 && (
