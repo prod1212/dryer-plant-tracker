@@ -2,10 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = 3001;
-const DB_PATH = path.join(__dirname, 'tracker.json');
+const DB_PATH = path.join(__dirname, 'tracker.db');
+const JSON_PATH = path.join(__dirname, 'tracker.json');
 
 app.use(cors());
 app.use(express.json());
@@ -24,7 +26,7 @@ app.use(express.json());
 // Card shows margin as the target (intent), not a live forecast.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─── COMMIT 7 — FILE STORAGE DECISION ────────────────────────────────────────
+// ─── COMMIT 8 — FILE STORAGE DECISION ────────────────────────────────────────
 // Files (attachments, drawings, RFQs, quotes, mass balances) live on the SERVER
 // FILESYSTEM, organized by job: uploads/TI-1001/filename.pdf
 // Metadata (filename, size, job_id, upload_date, path) lives in the database.
@@ -34,23 +36,172 @@ app.use(express.json());
 // On-prem server hosting is the target deployment environment.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─── JSON FILE STORE ──────────────────────────────────────────────────────────
+// ─── DATABASE SETUP ───────────────────────────────────────────────────────────
 
-function loadDb() {
-  if (!fs.existsSync(DB_PATH)) {
-    return { jobs: [], groups: [], items: [], milestones: [], contacts: [], seq: { jobs: 1, groups: 1, items: 1, milestones: 1, contacts: 1 } };
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS jobs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_number        TEXT NOT NULL,
+    customer          TEXT DEFAULT '',
+    revision          TEXT DEFAULT '',
+    pcr               TEXT DEFAULT '',
+    project_type      TEXT DEFAULT 'other',
+    job_status        TEXT DEFAULT 'lead',
+    customer_po       TEXT DEFAULT '',
+    project_sell      REAL DEFAULT 0,
+    estimated_install REAL DEFAULT 0,
+    outbound_freight  REAL DEFAULT 0,
+    collected         REAL DEFAULT 0,
+    target_margin     REAL DEFAULT 35,
+    notes             TEXT DEFAULT '',
+    created_at        TEXT,
+    updated_at        TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    order_index INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS items (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id          INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    drawing           TEXT DEFAULT '',
+    description       TEXT DEFAULT '',
+    qty_per_dwg       INTEGER DEFAULT 1,
+    pid_number        TEXT DEFAULT '',
+    weeks_lead        INTEGER,
+    qty_ordered       INTEGER,
+    vendor            TEXT DEFAULT '',
+    vendor_part_no    TEXT DEFAULT '',
+    rfq_date          TEXT DEFAULT '',
+    po_number         TEXT DEFAULT '',
+    date_ordered      TEXT DEFAULT '',
+    ship_to           TEXT DEFAULT '',
+    estimated_delivery TEXT DEFAULT '',
+    received          INTEGER DEFAULT 0,
+    ship_list         TEXT DEFAULT '',
+    cost              REAL DEFAULT 0,
+    budgeted_cost     REAL DEFAULT 0,
+    dp_percent        REAL DEFAULT 0,
+    down_payment      REAL DEFAULT 0,
+    freight           REAL DEFAULT 0,
+    po_total          REAL DEFAULT 0,
+    status            TEXT DEFAULT 'not_started',
+    notes             TEXT DEFAULT '',
+    created_at        TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS milestones (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id         INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    target_date    TEXT DEFAULT '',
+    completed_date TEXT DEFAULT '',
+    order_index    INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS contacts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    name       TEXT DEFAULT '',
+    role       TEXT DEFAULT 'other',
+    phone      TEXT DEFAULT '',
+    email      TEXT DEFAULT '',
+    created_at TEXT
+  );
+`);
+
+// ─── MIGRATION FROM tracker.json ─────────────────────────────────────────────
+
+if (fs.existsSync(JSON_PATH)) {
+  console.log('Found tracker.json — migrating data to SQLite...');
+  try {
+    const json = JSON.parse(fs.readFileSync(JSON_PATH, 'utf8'));
+
+    const migrate = db.transaction(() => {
+      // Build ID maps so foreign keys stay consistent
+      const jobIdMap = {};
+      const groupIdMap = {};
+
+      for (const j of (json.jobs || [])) {
+        const info = db.prepare(`
+          INSERT INTO jobs (job_number, customer, revision, pcr, project_type, job_status,
+            customer_po, project_sell, estimated_install, outbound_freight, collected,
+            target_margin, notes, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          j.job_number, j.customer || '', j.revision || '', j.pcr || '',
+          j.project_type || 'other', j.job_status || 'lead', j.customer_po || '',
+          j.project_sell || 0, j.estimated_install || 0, j.outbound_freight || 0,
+          j.collected || 0, j.target_margin || 35, j.notes || '',
+          j.created_at || new Date().toISOString(), j.updated_at || new Date().toISOString()
+        );
+        jobIdMap[j.id] = info.lastInsertRowid;
+      }
+
+      for (const g of (json.groups || [])) {
+        const newJobId = jobIdMap[g.job_id];
+        if (!newJobId) continue;
+        const info = db.prepare(`
+          INSERT INTO groups (job_id, name, order_index) VALUES (?, ?, ?)
+        `).run(newJobId, g.name, g.order_index || 0);
+        groupIdMap[g.id] = info.lastInsertRowid;
+      }
+
+      for (const i of (json.items || [])) {
+        const newGroupId = groupIdMap[i.group_id];
+        if (!newGroupId) continue;
+        db.prepare(`
+          INSERT INTO items (group_id, drawing, description, qty_per_dwg, pid_number,
+            weeks_lead, qty_ordered, vendor, vendor_part_no, rfq_date, po_number,
+            date_ordered, ship_to, estimated_delivery, received, ship_list, cost,
+            budgeted_cost, dp_percent, down_payment, freight, po_total, status, notes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          newGroupId, i.drawing || '', i.description || '', i.qty_per_dwg || 1,
+          i.pid_number || '', i.weeks_lead || null, i.qty_ordered || null,
+          i.vendor || '', i.vendor_part_no || '', i.rfq_date || '', i.po_number || '',
+          i.date_ordered || '', i.ship_to || '', i.estimated_delivery || '',
+          i.received ? 1 : 0, i.ship_list || '', i.cost || 0, i.budgeted_cost || 0,
+          i.dp_percent || 0, i.down_payment || 0, i.freight || 0, i.po_total || 0,
+          i.status || 'not_started', i.notes || '', i.created_at || new Date().toISOString()
+        );
+      }
+
+      for (const m of (json.milestones || [])) {
+        const newJobId = jobIdMap[m.job_id];
+        if (!newJobId) continue;
+        db.prepare(`
+          INSERT INTO milestones (job_id, name, target_date, completed_date, order_index)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(newJobId, m.name, m.target_date || '', m.completed_date || '', m.order_index || 0);
+      }
+
+      for (const c of (json.contacts || [])) {
+        const newJobId = jobIdMap[c.job_id];
+        if (!newJobId) continue;
+        db.prepare(`
+          INSERT INTO contacts (job_id, name, role, phone, email, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(newJobId, c.name || '', c.role || 'other', c.phone || '', c.email || '',
+          c.created_at || new Date().toISOString());
+      }
+    });
+
+    migrate();
+    fs.renameSync(JSON_PATH, JSON_PATH + '.migrated');
+    console.log('Migration complete. tracker.json renamed to tracker.json.migrated.');
+  } catch (err) {
+    console.error('Migration failed:', err.message);
+    console.error('tracker.json left untouched. Fix the error and restart.');
   }
-  return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-}
-
-function saveDb(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
-
-function nextId(db, table) {
-  const id = db.seq[table];
-  db.seq[table]++;
-  return id;
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -71,39 +222,19 @@ function calcCompletion(items) {
   return 100;
 }
 
-function getJobWithStats(db, jobId) {
-  const raw = db.jobs.find(j => j.id === jobId);
-  if (!raw) return null;
+function getJobWithStats(jobId) {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+  if (!job) return null;
 
-  // Supply defaults for fields absent in records created before they were added
-  const job = {
-    project_type: 'other',
-    job_status: 'lead',
-    customer_po: '',
-    revision: '',
-    estimated_install: 0,
-    outbound_freight: 0,
-    collected: 0,
-    target_margin: 35,
-    ...raw,
-  };
-
-  const groups = db.groups
-    .filter(g => g.job_id === jobId)
-    .sort((a, b) => a.order_index - b.order_index || a.id - b.id)
+  const groups = db.prepare('SELECT * FROM groups WHERE job_id = ? ORDER BY order_index, id').all(jobId)
     .map(g => ({
       ...g,
-      items: db.items.filter(i => i.group_id === g.id).sort((a, b) => a.id - b.id),
+      items: db.prepare('SELECT * FROM items WHERE group_id = ? ORDER BY id').all(g.id),
     }));
 
   const allItems = groups.flatMap(g => g.items);
-  const milestones = db.milestones
-    .filter(m => m.job_id === jobId)
-    .sort((a, b) => a.order_index - b.order_index || a.id - b.id);
-
-  const contacts = (db.contacts || [])
-    .filter(c => c.job_id === jobId)
-    .sort((a, b) => a.id - b.id);
+  const milestones = db.prepare('SELECT * FROM milestones WHERE job_id = ? ORDER BY order_index, id').all(jobId);
+  const contacts = db.prepare('SELECT * FROM contacts WHERE job_id = ? ORDER BY id').all(jobId);
 
   return {
     ...job,
@@ -127,221 +258,170 @@ function getJobWithStats(db, jobId) {
 // ─── JOBS ─────────────────────────────────────────────────────────────────────
 
 app.get('/api/jobs', (req, res) => {
-  const db = loadDb();
-  res.json(db.jobs.map(j => getJobWithStats(db, j.id)).filter(Boolean));
+  const jobs = db.prepare('SELECT id FROM jobs').all();
+  res.json(jobs.map(j => getJobWithStats(j.id)).filter(Boolean));
 });
 
 app.post('/api/jobs', (req, res) => {
-  const db = loadDb();
-  const { job_number, customer, revision, pcr, project_type, job_status, customer_po, project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
-  const job = {
-    id: nextId(db, 'jobs'), job_number, customer: customer || '', revision: revision || '',
-    pcr: pcr || '', project_type: project_type || 'other', job_status: job_status || 'lead',
-    customer_po: customer_po || '', project_sell: project_sell || 0,
-    estimated_install: estimated_install || 0, outbound_freight: outbound_freight || 0,
-    collected: collected || 0, target_margin: target_margin || 35,
-    notes: notes || '', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  };
-  db.jobs.push(job);
-  saveDb(db);
-  res.json(getJobWithStats(db, job.id));
+  const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
+    project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
+  const now = new Date().toISOString();
+  const info = db.prepare(`
+    INSERT INTO jobs (job_number, customer, revision, pcr, project_type, job_status,
+      customer_po, project_sell, estimated_install, outbound_freight, collected,
+      target_margin, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    job_number, customer || '', revision || '', pcr || '',
+    project_type || 'other', job_status || 'lead', customer_po || '',
+    project_sell || 0, estimated_install || 0, outbound_freight || 0,
+    collected || 0, target_margin || 35, notes || '', now, now
+  );
+  res.json(getJobWithStats(info.lastInsertRowid));
 });
 
 app.get('/api/jobs/:id', (req, res) => {
-  const db = loadDb();
-  const job = getJobWithStats(db, Number(req.params.id));
+  const job = getJobWithStats(Number(req.params.id));
   if (!job) return res.status(404).json({ error: 'Not found' });
   res.json(job);
 });
 
 app.put('/api/jobs/:id', (req, res) => {
-  const db = loadDb();
   const id = Number(req.params.id);
-  const idx = db.jobs.findIndex(j => j.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const { job_number, customer, revision, pcr, project_type, job_status, customer_po, project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
-  db.jobs[idx] = { ...db.jobs[idx], job_number, customer: customer || '', revision: revision || '',
-    pcr: pcr || '', project_type: project_type || 'other', job_status: job_status || 'lead',
-    customer_po: customer_po || '', project_sell: project_sell || 0,
-    estimated_install: estimated_install || 0, outbound_freight: outbound_freight || 0,
-    collected: collected || 0, target_margin: target_margin || 35,
-    notes: notes || '', updated_at: new Date().toISOString() };
-  saveDb(db);
-  res.json(getJobWithStats(db, id));
+  const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
+    project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
+  db.prepare(`
+    UPDATE jobs SET job_number=?, customer=?, revision=?, pcr=?, project_type=?,
+      job_status=?, customer_po=?, project_sell=?, estimated_install=?, outbound_freight=?,
+      collected=?, target_margin=?, notes=?, updated_at=? WHERE id=?
+  `).run(
+    job_number, customer || '', revision || '', pcr || '',
+    project_type || 'other', job_status || 'lead', customer_po || '',
+    project_sell || 0, estimated_install || 0, outbound_freight || 0,
+    collected || 0, target_margin || 35, notes || '', new Date().toISOString(), id
+  );
+  res.json(getJobWithStats(id));
 });
 
 app.delete('/api/jobs/:id', (req, res) => {
-  const db = loadDb();
-  const id = Number(req.params.id);
-  const groupIds = db.groups.filter(g => g.job_id === id).map(g => g.id);
-  db.items = db.items.filter(i => !groupIds.includes(i.group_id));
-  db.milestones = db.milestones.filter(m => m.job_id !== id);
-  db.groups = db.groups.filter(g => g.job_id !== id);
-  if (!db.contacts) db.contacts = [];
-  db.contacts = db.contacts.filter(c => c.job_id !== id);
-  db.jobs = db.jobs.filter(j => j.id !== id);
-  saveDb(db);
+  db.prepare('DELETE FROM jobs WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
 // ─── CONTACTS ─────────────────────────────────────────────────────────────────
 
 app.post('/api/jobs/:jobId/contacts', (req, res) => {
-  const db = loadDb();
-  if (!db.contacts) db.contacts = [];
-  if (!db.seq.contacts) db.seq.contacts = 1;
   const { name, role, phone, email } = req.body;
-  const contact = {
-    id: nextId(db, 'contacts'),
-    job_id: Number(req.params.jobId),
-    name: name || '', role: role || 'other',
-    phone: phone || '', email: email || '',
-    created_at: new Date().toISOString(),
-  };
-  db.contacts.push(contact);
-  saveDb(db);
-  res.json(contact);
+  const info = db.prepare(`
+    INSERT INTO contacts (job_id, name, role, phone, email, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(Number(req.params.jobId), name || '', role || 'other', phone || '', email || '', new Date().toISOString());
+  res.json(db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid));
 });
 
 app.put('/api/contacts/:id', (req, res) => {
-  const db = loadDb();
-  if (!db.contacts) db.contacts = [];
-  const id = Number(req.params.id);
-  const idx = db.contacts.findIndex(c => c.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const { name, role, phone, email } = req.body;
-  db.contacts[idx] = { ...db.contacts[idx], name, role, phone: phone || '', email: email || '' };
-  saveDb(db);
-  res.json(db.contacts[idx]);
+  db.prepare('UPDATE contacts SET name=?, role=?, phone=?, email=? WHERE id=?')
+    .run(name, role, phone || '', email || '', Number(req.params.id));
+  res.json(db.prepare('SELECT * FROM contacts WHERE id = ?').get(Number(req.params.id)));
 });
 
 app.delete('/api/contacts/:id', (req, res) => {
-  const db = loadDb();
-  if (!db.contacts) db.contacts = [];
-  db.contacts = db.contacts.filter(c => c.id !== Number(req.params.id));
-  saveDb(db);
+  db.prepare('DELETE FROM contacts WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
 // ─── EQUIPMENT GROUPS ─────────────────────────────────────────────────────────
 
 app.post('/api/jobs/:jobId/groups', (req, res) => {
-  const db = loadDb();
   const { name, order_index } = req.body;
-  const group = { id: nextId(db, 'groups'), job_id: Number(req.params.jobId), name, order_index: order_index || 0 };
-  db.groups.push(group);
-  saveDb(db);
-  res.json(group);
+  const info = db.prepare('INSERT INTO groups (job_id, name, order_index) VALUES (?, ?, ?)')
+    .run(Number(req.params.jobId), name, order_index || 0);
+  res.json(db.prepare('SELECT * FROM groups WHERE id = ?').get(info.lastInsertRowid));
 });
 
 app.put('/api/groups/:id', (req, res) => {
-  const db = loadDb();
-  const id = Number(req.params.id);
-  const idx = db.groups.findIndex(g => g.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  db.groups[idx] = { ...db.groups[idx], name: req.body.name, order_index: req.body.order_index || 0 };
-  saveDb(db);
-  res.json(db.groups[idx]);
+  db.prepare('UPDATE groups SET name=?, order_index=? WHERE id=?')
+    .run(req.body.name, req.body.order_index || 0, Number(req.params.id));
+  res.json(db.prepare('SELECT * FROM groups WHERE id = ?').get(Number(req.params.id)));
 });
 
 app.delete('/api/groups/:id', (req, res) => {
-  const db = loadDb();
-  const id = Number(req.params.id);
-  db.items = db.items.filter(i => i.group_id !== id);
-  db.groups = db.groups.filter(g => g.id !== id);
-  saveDb(db);
+  db.prepare('DELETE FROM groups WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
 // ─── LINE ITEMS ───────────────────────────────────────────────────────────────
 
 app.get('/api/groups/:groupId/items', (req, res) => {
-  const db = loadDb();
-  res.json(db.items.filter(i => i.group_id === Number(req.params.groupId)));
+  res.json(db.prepare('SELECT * FROM items WHERE group_id = ? ORDER BY id').all(Number(req.params.groupId)));
 });
 
 app.post('/api/groups/:groupId/items', (req, res) => {
-  const db = loadDb();
   const f = req.body;
-  const item = {
-    id: nextId(db, 'items'), group_id: Number(req.params.groupId),
-    drawing: f.drawing || '', description: f.description || '',
-    qty_per_dwg: f.qty_per_dwg || 1, pid_number: f.pid_number || '',
-    weeks_lead: f.weeks_lead || null, qty_ordered: f.qty_ordered || null,
-    vendor: f.vendor || '', vendor_part_no: f.vendor_part_no || '',
-    rfq_date: f.rfq_date || '', po_number: f.po_number || '',
-    date_ordered: f.date_ordered || '', ship_to: f.ship_to || '',
-    estimated_delivery: f.estimated_delivery || '', received: f.received ? 1 : 0,
-    ship_list: f.ship_list || '', cost: f.cost || 0, budgeted_cost: f.budgeted_cost || 0,
-    dp_percent: f.dp_percent || 0, down_payment: f.down_payment || 0,
-    freight: f.freight || 0, po_total: f.po_total || 0,
-    status: f.status || 'not_started', notes: f.notes || '',
-    created_at: new Date().toISOString(),
-  };
-  db.items.push(item);
-  saveDb(db);
-  res.json(item);
+  const info = db.prepare(`
+    INSERT INTO items (group_id, drawing, description, qty_per_dwg, pid_number, weeks_lead,
+      qty_ordered, vendor, vendor_part_no, rfq_date, po_number, date_ordered, ship_to,
+      estimated_delivery, received, ship_list, cost, budgeted_cost, dp_percent, down_payment,
+      freight, po_total, status, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    Number(req.params.groupId), f.drawing || '', f.description || '', f.qty_per_dwg || 1,
+    f.pid_number || '', f.weeks_lead || null, f.qty_ordered || null, f.vendor || '',
+    f.vendor_part_no || '', f.rfq_date || '', f.po_number || '', f.date_ordered || '',
+    f.ship_to || '', f.estimated_delivery || '', f.received ? 1 : 0, f.ship_list || '',
+    f.cost || 0, f.budgeted_cost || 0, f.dp_percent || 0, f.down_payment || 0,
+    f.freight || 0, f.po_total || 0, f.status || 'not_started', f.notes || '',
+    new Date().toISOString()
+  );
+  res.json(db.prepare('SELECT * FROM items WHERE id = ?').get(info.lastInsertRowid));
 });
 
 app.put('/api/items/:id', (req, res) => {
-  const db = loadDb();
-  const id = Number(req.params.id);
-  const idx = db.items.findIndex(i => i.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const f = req.body;
-  db.items[idx] = {
-    ...db.items[idx],
-    drawing: f.drawing || '', description: f.description || '',
-    qty_per_dwg: f.qty_per_dwg || 1, pid_number: f.pid_number || '',
-    weeks_lead: f.weeks_lead || null, qty_ordered: f.qty_ordered || null,
-    vendor: f.vendor || '', vendor_part_no: f.vendor_part_no || '',
-    rfq_date: f.rfq_date || '', po_number: f.po_number || '',
-    date_ordered: f.date_ordered || '', ship_to: f.ship_to || '',
-    estimated_delivery: f.estimated_delivery || '', received: f.received ? 1 : 0,
-    ship_list: f.ship_list || '', cost: f.cost || 0, budgeted_cost: f.budgeted_cost || 0,
-    dp_percent: f.dp_percent || 0, down_payment: f.down_payment || 0,
-    freight: f.freight || 0, po_total: f.po_total || 0,
-    status: f.status || 'not_started', notes: f.notes || '',
-  };
-  saveDb(db);
-  res.json(db.items[idx]);
+  const id = Number(req.params.id);
+  db.prepare(`
+    UPDATE items SET drawing=?, description=?, qty_per_dwg=?, pid_number=?, weeks_lead=?,
+      qty_ordered=?, vendor=?, vendor_part_no=?, rfq_date=?, po_number=?, date_ordered=?,
+      ship_to=?, estimated_delivery=?, received=?, ship_list=?, cost=?, budgeted_cost=?,
+      dp_percent=?, down_payment=?, freight=?, po_total=?, status=?, notes=? WHERE id=?
+  `).run(
+    f.drawing || '', f.description || '', f.qty_per_dwg || 1, f.pid_number || '',
+    f.weeks_lead || null, f.qty_ordered || null, f.vendor || '', f.vendor_part_no || '',
+    f.rfq_date || '', f.po_number || '', f.date_ordered || '', f.ship_to || '',
+    f.estimated_delivery || '', f.received ? 1 : 0, f.ship_list || '', f.cost || 0,
+    f.budgeted_cost || 0, f.dp_percent || 0, f.down_payment || 0, f.freight || 0,
+    f.po_total || 0, f.status || 'not_started', f.notes || '', id
+  );
+  res.json(db.prepare('SELECT * FROM items WHERE id = ?').get(id));
 });
 
 app.delete('/api/items/:id', (req, res) => {
-  const db = loadDb();
-  db.items = db.items.filter(i => i.id !== Number(req.params.id));
-  saveDb(db);
+  db.prepare('DELETE FROM items WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
 // ─── MILESTONES ───────────────────────────────────────────────────────────────
 
 app.post('/api/jobs/:jobId/milestones', (req, res) => {
-  const db = loadDb();
   const { name, target_date, completed_date, order_index } = req.body;
-  const m = { id: nextId(db, 'milestones'), job_id: Number(req.params.jobId),
-    name, target_date: target_date || '', completed_date: completed_date || '', order_index: order_index || 0 };
-  db.milestones.push(m);
-  saveDb(db);
-  res.json(m);
+  const info = db.prepare(`
+    INSERT INTO milestones (job_id, name, target_date, completed_date, order_index)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(Number(req.params.jobId), name, target_date || '', completed_date || '', order_index || 0);
+  res.json(db.prepare('SELECT * FROM milestones WHERE id = ?').get(info.lastInsertRowid));
 });
 
 app.put('/api/milestones/:id', (req, res) => {
-  const db = loadDb();
-  const id = Number(req.params.id);
-  const idx = db.milestones.findIndex(m => m.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
   const { name, target_date, completed_date, order_index } = req.body;
-  db.milestones[idx] = { ...db.milestones[idx], name, target_date: target_date || '',
-    completed_date: completed_date || '', order_index: order_index || 0 };
-  saveDb(db);
-  res.json(db.milestones[idx]);
+  const id = Number(req.params.id);
+  db.prepare('UPDATE milestones SET name=?, target_date=?, completed_date=?, order_index=? WHERE id=?')
+    .run(name, target_date || '', completed_date || '', order_index || 0, id);
+  res.json(db.prepare('SELECT * FROM milestones WHERE id = ?').get(id));
 });
 
 app.delete('/api/milestones/:id', (req, res) => {
-  const db = loadDb();
-  db.milestones = db.milestones.filter(m => m.id !== Number(req.params.id));
-  saveDb(db);
+  db.prepare('DELETE FROM milestones WHERE id = ?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
