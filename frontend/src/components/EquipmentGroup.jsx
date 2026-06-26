@@ -20,8 +20,12 @@ const STATUS_LABELS = {
 
 const fmt$ = (n) => n ? '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '—'
 
-export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
-  const [expanded, setExpanded] = useState(group.items.length > 0)
+// section: { code, name, order_index }
+// items:   array of item rows for this section on this job
+export default function EquipmentGroup({ section, items, jobId, onRefresh }) {
+  // Auto-collapse if section has no PO'd items
+  const hasPOs = items.some(i => i.po_number)
+  const [expanded, setExpanded] = useState(hasPOs)
   const [showItemModal, setShowItemModal] = useState(false)
   const [editingItem, setEditingItem] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
@@ -29,11 +33,13 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
   const handleSaveItem = async (data) => {
     if (editingItem) {
       await fetch(`/api/items/${editingItem.id}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
       })
     } else {
-      await fetch(`/api/groups/${group.id}/items`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+      await fetch(`/api/jobs/${jobId}/items`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...data, section_code: section.code }),
       })
     }
     setShowItemModal(false)
@@ -48,30 +54,27 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
     })
   }
 
-  const totalCost = group.items.reduce((s, i) => s + (i.cost || 0), 0)
+  const totalCost = items.reduce((s, i) => s + (i.cost || 0), 0)
+  const isEmpty = items.length === 0
 
   return (
-    <div style={{ marginBottom: 10, background: 'var(--surface2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)', overflow: 'hidden' }}>
-      {/* Group header */}
+    <div style={{ marginBottom: 10, background: 'var(--surface2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)', overflow: 'hidden', opacity: isEmpty ? 0.55 : 1 }}>
+      {/* Section header */}
       <div
         style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', cursor: 'pointer', userSelect: 'none' }}
         onClick={() => setExpanded(e => !e)}
       >
         <span style={{ color: 'var(--text3)', fontSize: 12 }}>{expanded ? '▼' : '▶'}</span>
-        <span style={{ fontWeight: 700, fontSize: 13, flex: 1, color: 'var(--accent2)' }}>{group.name}</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <span style={{ fontSize: 11, color: 'var(--text3)', position: 'relative', top: 1 }}>{group.items.length} items · {fmt$(totalCost)}</span>
-          <div style={{ display: 'flex' }}>
-            <button className="btn-icon" onClick={e => { e.stopPropagation(); onEdit() }}>✏️</button>
-            <button className="btn-icon" onClick={e => { e.stopPropagation(); onDelete() }} style={{ marginLeft: -9 }}>🗑️</button>
-          </div>
-        </div>
+        <span style={{ fontWeight: 700, fontSize: 13, flex: 1, color: isEmpty ? 'var(--text3)' : 'var(--accent2)' }}>{section.name}</span>
+        <span style={{ fontSize: 11, color: 'var(--text3)', position: 'relative', top: 1 }}>
+          {items.length > 0 ? `${items.length} item${items.length !== 1 ? 's' : ''} · ${fmt$(totalCost)}` : 'empty'}
+        </span>
       </div>
 
       {/* Line items table */}
       {expanded && (
         <div style={{ overflowX: 'auto', borderTop: '1px solid var(--border)' }}>
-          {group.items.length > 0 ? (
+          {items.length > 0 ? (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
               <thead>
                 <tr style={{ background: 'var(--surface3)' }}>
@@ -81,7 +84,7 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
                 </tr>
               </thead>
               <tbody>
-                {group.items.map((item, idx) => (
+                {items.map((item, idx) => (
                   <tr key={item.id} style={{ borderTop: '1px solid var(--surface3)', background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
                     <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>{item.drawing || '—'}</td>
                     <td style={{ padding: '5px 8px', color: 'var(--text)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.description}>{item.description || '—'}</td>
@@ -108,7 +111,7 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
               </tbody>
             </table>
           ) : (
-            <div style={{ padding: '10px 12px', color: 'var(--text3)', fontSize: 12 }}>No line items yet.</div>
+            <div style={{ padding: '10px 12px', color: 'var(--text3)', fontSize: 12 }}>No line items in this section.</div>
           )}
           <div style={{ padding: '6px 10px', borderTop: '1px solid var(--surface3)' }}>
             <button

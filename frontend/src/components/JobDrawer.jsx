@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import EquipmentGroup from './EquipmentGroup.jsx'
-import GroupModal from './GroupModal.jsx'
 import ItemModal from './ItemModal.jsx'
 import DrawerSchedule from './DrawerSchedule.jsx'
 import ConfirmModal from './ConfirmModal.jsx'
@@ -48,8 +47,6 @@ const ROLES = [
 
 export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh }) {
   const [activeTab, setActiveTab] = useState('equipment_groups')
-  const [showGroupModal, setShowGroupModal] = useState(false)
-  const [editingGroup, setEditingGroup] = useState(null)
   const [visible, setVisible] = useState(false)
   const [pendingDelete, setPendingDelete] = useState(null)
 
@@ -60,6 +57,15 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
   const targetMargin = job.target_margin ?? 35
   const equipBudget = job.project_sell > 0 ? job.project_sell * (1 - targetMargin / 100) : 0
 
+  // Spend bar calculations
+  const allItems = job.sections.flatMap(s => s.items)
+  const actualCost     = allItems.filter(i => ['received','invoiced'].includes(i.status)).reduce((s, i) => s + (i.cost || 0), 0)
+  const poCommitted    = allItems.filter(i => i.status === 'po_issued').reduce((s, i) => s + (i.cost || 0), 0)
+  const totalCommitted = actualCost + poCommitted
+  const sell = job.project_sell || 0
+  const spendActualPct    = sell > 0 ? Math.min(100, (actualCost    / sell) * 100) : 0
+  const spendCommittedPct = sell > 0 ? Math.min(100, (totalCommitted / sell) * 100) : 0
+
   useEffect(() => { requestAnimationFrame(() => setVisible(true)) }, [])
 
   useEffect(() => {
@@ -69,24 +75,6 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
   }, [])
 
   const handleClose = () => { setVisible(false); setTimeout(onClose, 250) }
-
-  const handleSaveGroup = async (data) => {
-    if (editingGroup) {
-      await fetch(`/api/groups/${editingGroup.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
-    } else {
-      await fetch(`/api/jobs/${job.id}/groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
-    }
-    setShowGroupModal(false)
-    setEditingGroup(null)
-    onRefresh()
-  }
-
-  const handleDeleteGroup = (groupId) => {
-    setPendingDelete({
-      message: 'Delete this group and all its line items?',
-      action: async () => { await fetch(`/api/groups/${groupId}`, { method: 'DELETE' }); onRefresh() },
-    })
-  }
 
   return (
     <>
@@ -174,6 +162,47 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
               <BigStat label="Target Delivery" value={fmtDateShort(job.target_delivery) || job.target_delivery} />
             )}
           </div>
+
+          {/* Spend bar */}
+          {sell > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: 10, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Cost vs. Contract Value</span>
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>
+                  <span style={{ fontWeight: 700, color: 'var(--text)' }}>{Math.round(spendCommittedPct)}%</span>
+                  {' committed of '}<span style={{ fontWeight: 600, color: typeConfig.color }}>{fmt(sell)}</span>
+                </span>
+              </div>
+              <div style={{ display: 'flex', height: 24, borderRadius: 3, overflow: 'hidden',
+                background: 'var(--surface3)', border: '1px solid var(--border)' }}>
+                <div style={{ width: spendActualPct + '%', background: '#22c55e', flexShrink: 0,
+                  transition: 'width 0.4s', display: 'flex', alignItems: 'center', paddingLeft: 6,
+                  borderRight: spendActualPct > 0 ? '1px solid rgba(0,0,0,0.2)' : 'none' }}>
+                  {spendActualPct >= 10 && (
+                    <span style={{ fontSize: 9, fontWeight: 700, color: 'rgba(0,0,0,0.65)', whiteSpace: 'nowrap' }}>
+                      Invoiced {Math.round(spendActualPct)}%
+                    </span>
+                  )}
+                </div>
+                <div style={{ width: Math.max(0, spendCommittedPct - spendActualPct) + '%', background: '#f97316',
+                  flexShrink: 0, transition: 'width 0.4s', display: 'flex', alignItems: 'center', paddingLeft: 6,
+                  borderRight: (spendCommittedPct - spendActualPct) > 0 ? '1px solid rgba(0,0,0,0.2)' : 'none' }}>
+                  {(spendCommittedPct - spendActualPct) >= 8 && (
+                    <span style={{ fontSize: 9, fontWeight: 700, color: 'rgba(0,0,0,0.65)', whiteSpace: 'nowrap' }}>
+                      PO'd {Math.round(spendCommittedPct - spendActualPct)}%
+                    </span>
+                  )}
+                </div>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', paddingLeft: 6 }}>
+                  {(100 - spendCommittedPct) >= 8 && (
+                    <span style={{ fontSize: 9, color: 'var(--text3)', whiteSpace: 'nowrap' }}>
+                      {fmt(Math.max(0, sell - totalCommitted))} uncommitted
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Tabs */}
@@ -201,24 +230,15 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
             isPartsJob
               ? <DrawerFlatItems job={job} onRefresh={onRefresh} />
               : <>
-                  {job.groups.length === 0 && (
-                    <div style={{ color: 'var(--text3)', fontSize: 14, textAlign: 'center', padding: '40px 0' }}>
-                      No equipment groups yet. Add one below.
-                    </div>
-                  )}
-                  {job.groups.map(group => (
+                  {job.sections.map(section => (
                     <EquipmentGroup
-                      key={group.id}
-                      group={group}
-                      onEdit={() => { setEditingGroup(group); setShowGroupModal(true) }}
-                      onDelete={() => handleDeleteGroup(group.id)}
+                      key={section.code}
+                      section={section}
+                      items={section.items}
+                      jobId={job.id}
                       onRefresh={onRefresh}
                     />
                   ))}
-                  <button className="btn-ghost btn-sm" onClick={() => { setEditingGroup(null); setShowGroupModal(true) }}
-                    style={{ marginTop: 8, width: '100%', border: '1px dashed var(--border)', borderRadius: 'var(--radius)', padding: '10px' }}>
-                    + Add Equipment Group
-                  </button>
                 </>
           )}
 
@@ -228,13 +248,6 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
         </div>
       </div>
 
-      {showGroupModal && (
-        <GroupModal
-          group={editingGroup}
-          onSave={handleSaveGroup}
-          onClose={() => { setShowGroupModal(false); setEditingGroup(null) }}
-        />
-      )}
       {pendingDelete && (
         <ConfirmModal
           message={pendingDelete.message}
@@ -266,23 +279,13 @@ function DrawerFlatItems({ job, onRefresh }) {
   const [showItemModal, setShowItemModal] = useState(false)
   const [editingItem, setEditingItem] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
-  const allItems = job.groups.flatMap(g => g.items)
-
-  const ensureGroup = async () => {
-    if (job.groups.length > 0) return job.groups[0].id
-    const res = await fetch(`/api/jobs/${job.id}/groups`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Parts', order_index: 0 }),
-    })
-    return (await res.json()).id
-  }
+  const allItems = job.sections.flatMap(s => s.items)
 
   const handleSaveItem = async (data) => {
     if (editingItem) {
       await fetch(`/api/items/${editingItem.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
     } else {
-      const groupId = await ensureGroup()
-      await fetch(`/api/groups/${groupId}/items`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+      await fetch(`/api/jobs/${job.id}/items`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
     }
     setShowItemModal(false)
     setEditingItem(null)

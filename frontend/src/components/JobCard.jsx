@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import EquipmentGroup from './EquipmentGroup.jsx'
-import GroupModal from './GroupModal.jsx'
 import ItemModal from './ItemModal.jsx'
 import ConfirmModal from './ConfirmModal.jsx'
 
@@ -30,8 +29,6 @@ const STATUS_CONFIG = {
 
 export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer }) {
   const [expanded, setExpanded] = useState(false)
-  const [showGroupModal, setShowGroupModal] = useState(false)
-  const [editingGroup, setEditingGroup] = useState(null)
   const [activeTab, setActiveTab] = useState('equipment_groups')
   const [pendingDelete, setPendingDelete] = useState(null)
   const isPartsJob = /^P/i.test(job.job_number)
@@ -40,28 +37,6 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
   const statusConfig = STATUS_CONFIG[job.job_status] || STATUS_CONFIG.lead
 
   const targetMargin = job.target_margin ?? 35
-
-  const handleSaveGroup = async (data) => {
-    if (editingGroup) {
-      await fetch(`/api/groups/${editingGroup.id}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-      })
-    } else {
-      await fetch(`/api/jobs/${job.id}/groups`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-      })
-    }
-    setShowGroupModal(false)
-    setEditingGroup(null)
-    onRefresh()
-  }
-
-  const handleDeleteGroup = (groupId) => {
-    setPendingDelete({
-      message: 'Delete this group and all its line items?',
-      action: async () => { await fetch(`/api/groups/${groupId}`, { method: 'DELETE' }); onRefresh() },
-    })
-  }
 
   return (
     <div style={{
@@ -170,22 +145,15 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
             isPartsJob
               ? <FlatItemsView job={job} onRefresh={onRefresh} />
               : <div style={{ padding: '10px 12px' }}>
-                  {job.groups.map(group => (
+                  {job.sections.map(section => (
                     <EquipmentGroup
-                      key={group.id}
-                      group={group}
-                      onEdit={() => { setEditingGroup(group); setShowGroupModal(true) }}
-                      onDelete={() => handleDeleteGroup(group.id)}
+                      key={section.code}
+                      section={section}
+                      items={section.items}
+                      jobId={job.id}
                       onRefresh={onRefresh}
                     />
                   ))}
-                  <button
-                    className="btn-ghost btn-sm"
-                    onClick={() => { setEditingGroup(null); setShowGroupModal(true) }}
-                    style={{ marginTop: 6, width: '100%', border: '1px dashed var(--border)', borderRadius: 'var(--radius)' }}
-                  >
-                    + Add Equipment Group
-                  </button>
                 </div>
           )}
 
@@ -199,13 +167,6 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
         </div>
       )}
 
-      {showGroupModal && (
-        <GroupModal
-          group={editingGroup}
-          onSave={handleSaveGroup}
-          onClose={() => { setShowGroupModal(false); setEditingGroup(null) }}
-        />
-      )}
       {pendingDelete && (
         <ConfirmModal
           message={pendingDelete.message}
@@ -291,17 +252,7 @@ function FlatItemsView({ job, onRefresh }) {
   const [editingItem, setEditingItem] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
 
-  const allItems = job.groups.flatMap(g => g.items)
-
-  const ensureGroup = async () => {
-    if (job.groups.length > 0) return job.groups[0].id
-    const res = await fetch(`/api/jobs/${job.id}/groups`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Parts', order_index: 0 }),
-    })
-    const g = await res.json()
-    return g.id
-  }
+  const allItems = job.sections.flatMap(s => s.items)
 
   const handleSaveItem = async (data) => {
     if (editingItem) {
@@ -309,8 +260,7 @@ function FlatItemsView({ job, onRefresh }) {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
       })
     } else {
-      const groupId = await ensureGroup()
-      await fetch(`/api/groups/${groupId}/items`, {
+      await fetch(`/api/jobs/${job.id}/items`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
       })
     }

@@ -43,39 +43,39 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS jobs (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_number              TEXT NOT NULL,
-    customer                TEXT DEFAULT '',
-    revision                TEXT DEFAULT '',
-    project_type            TEXT DEFAULT 'other',
-    job_status              TEXT DEFAULT 'lead',
-    customer_po             TEXT DEFAULT '',
-    project_sell            REAL DEFAULT 0,
-    estimated_install       REAL DEFAULT 0,
-    outbound_freight        REAL DEFAULT 0,
-    collected               REAL DEFAULT 0,
-    target_margin           REAL DEFAULT 35,
-    notes                   TEXT DEFAULT '',
-    target_delivery         TEXT DEFAULT '',
-    contract_signed         INTEGER DEFAULT 0,
-    contract_signed_date    TEXT DEFAULT '',
-    customer_po_received    INTEGER DEFAULT 0,
-    customer_po_received_date TEXT DEFAULT '',
-    created_at              TEXT,
-    updated_at              TEXT
+  CREATE TABLE IF NOT EXISTS sections (
+    code        INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    order_index INTEGER DEFAULT 0
   );
 
-  CREATE TABLE IF NOT EXISTS groups (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    order_index INTEGER DEFAULT 0
+  CREATE TABLE IF NOT EXISTS jobs (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_number                TEXT NOT NULL,
+    customer                  TEXT DEFAULT '',
+    revision                  TEXT DEFAULT '',
+    project_type              TEXT DEFAULT 'other',
+    job_status                TEXT DEFAULT 'lead',
+    customer_po               TEXT DEFAULT '',
+    project_sell              REAL DEFAULT 0,
+    estimated_install         REAL DEFAULT 0,
+    outbound_freight          REAL DEFAULT 0,
+    collected                 REAL DEFAULT 0,
+    target_margin             REAL DEFAULT 35,
+    notes                     TEXT DEFAULT '',
+    target_delivery           TEXT DEFAULT '',
+    contract_signed           INTEGER DEFAULT 0,
+    contract_signed_date      TEXT DEFAULT '',
+    customer_po_received      INTEGER DEFAULT 0,
+    customer_po_received_date TEXT DEFAULT '',
+    created_at                TEXT,
+    updated_at                TEXT
   );
 
   CREATE TABLE IF NOT EXISTS items (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id          INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    job_id            INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    section_code      INTEGER REFERENCES sections(code),
     drawing           TEXT DEFAULT '',
     description       TEXT DEFAULT '',
     qty_per_dwg       INTEGER DEFAULT 1,
@@ -122,20 +122,63 @@ db.exec(`
   );
 `);
 
-// ─── COLUMN MIGRATIONS (add new columns to existing DB) ──────────────────────
-const existingCols = db.prepare('PRAGMA table_info(jobs)').all().map(c => c.name);
-const newCols = [
+// ─── SEED SECTIONS (idempotent — INSERT OR IGNORE) ────────────────────────────
+// These are the standard equipment section codes. Add or remove rows in the
+// sections table (or via /api/sections) to change what appears globally.
+db.exec(`
+  INSERT OR IGNORE INTO sections (code, name, order_index) VALUES
+    (1000,  '1000',                     0),
+    (2000,  '2000',                     1),
+    (3000,  '3000',                     2),
+    (4000,  '4000',                     3),
+    (5000,  '5000 Misc.',               4),
+    (6000,  '6000 Baghouse',            5),
+    (7000,  '7000 Cold Feed',           6),
+    (8000,  '8000 Coolers',             7),
+    (9000,  '9000 Controls',            8),
+    (10000, '10000 Conveyors',          9),
+    (11000, '11000 Cyclone',           10),
+    (12000, '12000 Dryer',             11),
+    (13000, '13000 Oxidizer',          12),
+    (14000, '14000 Soil Conditioning', 13),
+    (15000, '15000 Dust',              14);
+`);
+
+// ─── COLUMN MIGRATIONS (safe — only runs if column is missing) ────────────────
+const jobCols = db.prepare('PRAGMA table_info(jobs)').all().map(c => c.name);
+const newJobCols = [
   ['target_delivery',           "TEXT DEFAULT ''"],
   ['contract_signed',           'INTEGER DEFAULT 0'],
   ['contract_signed_date',      "TEXT DEFAULT ''"],
   ['customer_po_received',      'INTEGER DEFAULT 0'],
   ['customer_po_received_date', "TEXT DEFAULT ''"],
 ];
-for (const [col, def] of newCols) {
-  if (!existingCols.includes(col)) {
+for (const [col, def] of newJobCols) {
+  if (!jobCols.includes(col)) {
     db.exec(`ALTER TABLE jobs ADD COLUMN ${col} ${def}`);
     console.log(`Added column: jobs.${col}`);
   }
+}
+
+// Migrate items table from old group-based schema if needed
+const itemCols = db.prepare('PRAGMA table_info(items)').all().map(c => c.name);
+if (!itemCols.includes('section_code')) {
+  db.exec(`ALTER TABLE items ADD COLUMN section_code INTEGER REFERENCES sections(code)`);
+  console.log('Added column: items.section_code');
+}
+if (!itemCols.includes('job_id')) {
+  db.exec(`ALTER TABLE items ADD COLUMN job_id INTEGER`);
+  // Try to populate job_id from old groups table if it still exists
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  if (tables.includes('groups')) {
+    db.exec(`
+      UPDATE items SET job_id = (
+        SELECT job_id FROM groups WHERE groups.id = items.group_id
+      ) WHERE job_id IS NULL
+    `);
+    console.log('Migrated items.job_id from groups table');
+  }
+  console.log('Added column: items.job_id');
 }
 
 // ─── MIGRATION FROM tracker.json ─────────────────────────────────────────────
@@ -146,9 +189,7 @@ if (fs.existsSync(JSON_PATH)) {
     const json = JSON.parse(fs.readFileSync(JSON_PATH, 'utf8'));
 
     const migrate = db.transaction(() => {
-      // Build ID maps so foreign keys stay consistent
       const jobIdMap = {};
-      const groupIdMap = {};
 
       for (const j of (json.jobs || [])) {
         const info = db.prepare(`
@@ -166,26 +207,22 @@ if (fs.existsSync(JSON_PATH)) {
         jobIdMap[j.id] = info.lastInsertRowid;
       }
 
+      const groupJobMap = {};
       for (const g of (json.groups || [])) {
-        const newJobId = jobIdMap[g.job_id];
-        if (!newJobId) continue;
-        const info = db.prepare(`
-          INSERT INTO groups (job_id, name, order_index) VALUES (?, ?, ?)
-        `).run(newJobId, g.name, g.order_index || 0);
-        groupIdMap[g.id] = info.lastInsertRowid;
+        groupJobMap[g.id] = jobIdMap[g.job_id];
       }
 
       for (const i of (json.items || [])) {
-        const newGroupId = groupIdMap[i.group_id];
-        if (!newGroupId) continue;
+        const newJobId = groupJobMap[i.group_id];
+        if (!newJobId) continue;
         db.prepare(`
-          INSERT INTO items (group_id, drawing, description, qty_per_dwg, pid_number,
+          INSERT INTO items (job_id, section_code, drawing, description, qty_per_dwg, pid_number,
             weeks_lead, qty_ordered, vendor, vendor_part_no, rfq_date, po_number,
             date_ordered, ship_to, estimated_delivery, received, ship_list, cost,
             budgeted_cost, dp_percent, down_payment, freight, po_total, status, notes, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          newGroupId, i.drawing || '', i.description || '', i.qty_per_dwg || 1,
+          newJobId, null, i.drawing || '', i.description || '', i.qty_per_dwg || 1,
           i.pid_number || '', i.weeks_lead || null, i.qty_ordered || null,
           i.vendor || '', i.vendor_part_no || '', i.rfq_date || '', i.po_number || '',
           i.date_ordered || '', i.ship_to || '', i.estimated_delivery || '',
@@ -235,7 +272,6 @@ function calcCompletion(items) {
   if (!items.length) return { pct: 0, bucket: 0 };
   const avg = items.reduce((s, i) => s + (STATUS_WEIGHT[i.status] || 0), 0) / items.length;
   const pct = Math.round(avg * 100);
-  // bucket for board column + tag color (0 / 25 / 50 / 75 / 100)
   const bucket = pct === 100 ? 100 : pct < 13 ? 0 : pct < 38 ? 25 : pct < 63 ? 50 : 75;
   return { pct, bucket };
 }
@@ -244,36 +280,198 @@ function getJobWithStats(jobId) {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
   if (!job) return null;
 
-  const groups = db.prepare('SELECT * FROM groups WHERE job_id = ? ORDER BY order_index, id').all(jobId)
-    .map(g => ({
-      ...g,
-      items: db.prepare('SELECT * FROM items WHERE group_id = ? ORDER BY id').all(g.id),
-    }));
+  const allSections = db.prepare('SELECT * FROM sections ORDER BY order_index, code').all();
+  const allItems    = db.prepare('SELECT * FROM items WHERE job_id = ? ORDER BY section_code, id').all(jobId);
 
-  const allItems = groups.flatMap(g => g.items);
+  // Group items by section_code
+  const bySection = {};
+  for (const item of allItems) {
+    const k = item.section_code || 0;
+    if (!bySection[k]) bySection[k] = [];
+    bySection[k].push(item);
+  }
+
+  const sections = allSections.map(s => ({
+    ...s,
+    items: bySection[s.code] || [],
+  }));
+
   const milestones = db.prepare('SELECT * FROM milestones WHERE job_id = ? ORDER BY order_index, id').all(jobId);
-  const contacts = db.prepare('SELECT * FROM contacts WHERE job_id = ? ORDER BY id').all(jobId);
-
+  const contacts   = db.prepare('SELECT * FROM contacts WHERE job_id = ? ORDER BY id').all(jobId);
   const completion = calcCompletion(allItems);
+
   return {
     ...job,
-    groups,
+    sections,
     milestones,
     contacts,
     stats: {
-      totalItems: allItems.length,
-      poCount: allItems.filter(i => ['po_issued','received','invoiced'].includes(i.status)).length,
-      receivedCount: allItems.filter(i => i.received).length,
-      totalCost: allItems.reduce((s, i) => s + (i.cost || 0), 0),
-      totalBudgeted: allItems.reduce((s, i) => s + (i.budgeted_cost || 0), 0),
-      totalFreight: allItems.reduce((s, i) => s + (i.freight || 0), 0),
+      totalItems:       allItems.length,
+      poCount:          allItems.filter(i => ['po_issued','received','invoiced'].includes(i.status)).length,
+      receivedCount:    allItems.filter(i => i.received).length,
+      totalCost:        allItems.reduce((s, i) => s + (i.cost || 0), 0),
+      totalBudgeted:    allItems.reduce((s, i) => s + (i.budgeted_cost || 0), 0),
+      totalFreight:     allItems.reduce((s, i) => s + (i.freight || 0), 0),
       totalDownPayment: allItems.reduce((s, i) => s + (i.down_payment || 0), 0),
-      totalPoTotal: allItems.reduce((s, i) => s + (i.po_total || 0), 0),
-      completion: completion.bucket,
-      completionPct: completion.pct,
+      totalPoTotal:     allItems.reduce((s, i) => s + (i.po_total || 0), 0),
+      completion:       completion.bucket,
+      completionPct:    completion.pct,
     },
   };
 }
+
+// ─── SECTIONS ─────────────────────────────────────────────────────────────────
+
+app.get('/api/sections', (req, res) => {
+  res.json(db.prepare('SELECT * FROM sections ORDER BY order_index, code').all());
+});
+
+app.post('/api/sections', (req, res) => {
+  const { code, name, order_index } = req.body;
+  db.prepare('INSERT INTO sections (code, name, order_index) VALUES (?, ?, ?)').run(
+    code, name, order_index || 0
+  );
+  res.json(db.prepare('SELECT * FROM sections WHERE code = ?').get(code));
+});
+
+app.put('/api/sections/:code', (req, res) => {
+  const { name, order_index } = req.body;
+  db.prepare('UPDATE sections SET name=?, order_index=? WHERE code=?')
+    .run(name, order_index ?? 0, Number(req.params.code));
+  res.json(db.prepare('SELECT * FROM sections WHERE code = ?').get(Number(req.params.code)));
+});
+
+app.delete('/api/sections/:code', (req, res) => {
+  db.prepare('DELETE FROM sections WHERE code = ?').run(Number(req.params.code));
+  res.json({ ok: true });
+});
+
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+
+app.get('/api/dashboard', (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+
+  // ── 1. Spend summary (active + on_hold jobs only) ──────────────────────────
+  const spend = db.prepare(`
+    SELECT
+      (SELECT COALESCE(SUM(project_sell), 0)
+       FROM jobs WHERE job_status IN ('active','on_hold'))                          AS totalSell,
+      COALESCE(SUM(CASE WHEN i.status IN ('po_issued','received','invoiced') THEN i.cost ELSE 0 END), 0) AS totalCommitted,
+      COALESCE(SUM(CASE WHEN i.status IN ('received','invoiced')             THEN i.cost ELSE 0 END), 0) AS totalActual,
+      COALESCE(SUM(i.budgeted_cost), 0)                                            AS totalBudgeted
+    FROM jobs j
+    LEFT JOIN items i ON i.job_id = j.id
+    WHERE j.job_status IN ('active','on_hold')
+  `).get();
+
+  // ── 2. Jobs by status ──────────────────────────────────────────────────────
+  const byStatus = Object.fromEntries(
+    db.prepare(`SELECT job_status, COUNT(*) AS count FROM jobs GROUP BY job_status`).all()
+      .map(r => [r.job_status, r.count])
+  );
+
+  // ── 3. Jobs by type ────────────────────────────────────────────────────────
+  const byType = Object.fromEntries(
+    db.prepare(`SELECT project_type, COUNT(*) AS count FROM jobs GROUP BY project_type`).all()
+      .map(r => [r.project_type, r.count])
+  );
+
+  // ── 4a. Overdue deliveries ─────────────────────────────────────────────────
+  const overdue = db.prepare(`
+    SELECT
+      j.id              AS jobId,
+      j.job_number      AS jobNumber,
+      j.customer,
+      COALESCE(s.name, '—') AS groupName,
+      i.id              AS itemId,
+      i.description,
+      i.vendor,
+      i.po_number,
+      i.estimated_delivery,
+      i.status,
+      CAST(julianday(?) - julianday(i.estimated_delivery) AS INTEGER) AS daysOverdue
+    FROM items i
+    JOIN jobs j ON j.id = i.job_id
+    LEFT JOIN sections s ON s.code = i.section_code
+    WHERE i.status = 'po_issued'
+      AND i.estimated_delivery != ''
+      AND i.estimated_delivery < ?
+    ORDER BY i.estimated_delivery ASC
+  `).all(today, today);
+
+  // ── 4b. Late to order ──────────────────────────────────────────────────────
+  const lateToOrder = db.prepare(`
+    SELECT
+      j.id              AS jobId,
+      j.job_number      AS jobNumber,
+      j.customer,
+      COALESCE(s.name, '—') AS groupName,
+      i.id              AS itemId,
+      i.description,
+      i.vendor,
+      i.estimated_delivery,
+      i.weeks_lead,
+      i.status,
+      CASE
+        WHEN i.weeks_lead IS NOT NULL AND i.weeks_lead > 0
+          THEN date(i.estimated_delivery, '-' || (i.weeks_lead * 7) || ' days')
+        ELSE i.estimated_delivery
+      END AS orderByDate,
+      CAST(julianday(?) - CASE
+        WHEN i.weeks_lead IS NOT NULL AND i.weeks_lead > 0
+          THEN julianday(i.estimated_delivery, '-' || (i.weeks_lead * 7) || ' days')
+        ELSE julianday(i.estimated_delivery)
+      END AS INTEGER) AS daysLate
+    FROM items i
+    JOIN jobs j ON j.id = i.job_id
+    LEFT JOIN sections s ON s.code = i.section_code
+    WHERE i.status NOT IN ('po_issued', 'received', 'invoiced')
+      AND i.estimated_delivery != ''
+      AND (
+        (i.weeks_lead IS NOT NULL AND i.weeks_lead > 0
+          AND date(i.estimated_delivery, '-' || (i.weeks_lead * 7) || ' days') < ?)
+        OR
+        (i.weeks_lead IS NULL AND i.estimated_delivery < ?)
+      )
+    ORDER BY orderByDate ASC
+  `).all(today, today, today);
+
+  // ── 5. Forecast at completion per active/on_hold/lead job ─────────────────
+  const activeJobs = db.prepare(`SELECT * FROM jobs WHERE job_status IN ('active','on_hold','lead')`).all();
+
+  const forecastByJob = activeJobs.map(job => {
+    const items = db.prepare('SELECT * FROM items WHERE job_id = ?').all(job.id);
+    const actualCost        = items.filter(i => ['received','invoiced'].includes(i.status))
+                                   .reduce((s, i) => s + (i.cost || 0), 0);
+    const committedCost     = items.filter(i => i.status === 'po_issued')
+                                   .reduce((s, i) => s + (i.cost || 0), 0);
+    const budgetedRemaining = items.filter(i => ['not_started','rfq_sent','quote_received'].includes(i.status))
+                                   .reduce((s, i) => s + (i.budgeted_cost || 0), 0);
+    const forecastCost      = actualCost + committedCost + budgetedRemaining;
+    const sell              = job.project_sell || 0;
+    const forecastMargin    = sell > 0 ? Math.round(((sell - forecastCost) / sell) * 1000) / 10 : null;
+    const completion        = calcCompletion(items);
+
+    return {
+      jobId:            job.id,
+      jobNumber:        job.job_number,
+      customer:         job.customer,
+      projectType:      job.project_type,
+      jobStatus:        job.job_status,
+      projectSell:      sell,
+      targetMargin:     job.target_margin || 35,
+      actualCost,
+      committedCost,
+      budgetedRemaining,
+      forecastCost,
+      forecastMargin,
+      completionPct:    completion.pct,
+      completion:       completion.bucket,
+    };
+  });
+
+  res.json({ spend, byStatus, byType, overdue, lateToOrder, forecastByJob });
+});
 
 // ─── JOBS ─────────────────────────────────────────────────────────────────────
 
@@ -283,19 +481,19 @@ app.get('/api/jobs', (req, res) => {
 });
 
 app.post('/api/jobs', (req, res) => {
-  const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
+  const { job_number, customer, revision, project_type, job_status, customer_po,
     project_sell, estimated_install, outbound_freight, collected, target_margin, notes,
     target_delivery, contract_signed, contract_signed_date,
     customer_po_received, customer_po_received_date } = req.body;
   const now = new Date().toISOString();
   const info = db.prepare(`
-    INSERT INTO jobs (job_number, customer, revision, pcr, project_type, job_status,
+    INSERT INTO jobs (job_number, customer, revision, project_type, job_status,
       customer_po, project_sell, estimated_install, outbound_freight, collected,
       target_margin, notes, target_delivery, contract_signed, contract_signed_date,
       customer_po_received, customer_po_received_date, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    job_number, customer || '', revision || '', pcr || '',
+    job_number, customer || '', revision || '',
     project_type || 'other', job_status || 'lead', customer_po || '',
     project_sell || 0, estimated_install || 0, outbound_freight || 0,
     collected || 0, target_margin || 35, notes || '',
@@ -313,18 +511,18 @@ app.get('/api/jobs/:id', (req, res) => {
 
 app.put('/api/jobs/:id', (req, res) => {
   const id = Number(req.params.id);
-  const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
+  const { job_number, customer, revision, project_type, job_status, customer_po,
     project_sell, estimated_install, outbound_freight, collected, target_margin, notes,
     target_delivery, contract_signed, contract_signed_date,
     customer_po_received, customer_po_received_date } = req.body;
   db.prepare(`
-    UPDATE jobs SET job_number=?, customer=?, revision=?, pcr=?, project_type=?,
+    UPDATE jobs SET job_number=?, customer=?, revision=?, project_type=?,
       job_status=?, customer_po=?, project_sell=?, estimated_install=?, outbound_freight=?,
       collected=?, target_margin=?, notes=?, target_delivery=?, contract_signed=?,
       contract_signed_date=?, customer_po_received=?, customer_po_received_date=?,
       updated_at=? WHERE id=?
   `).run(
-    job_number, customer || '', revision || '', pcr || '',
+    job_number, customer || '', revision || '',
     project_type || 'other', job_status || 'lead', customer_po || '',
     project_sell || 0, estimated_install || 0, outbound_freight || 0,
     collected || 0, target_margin || 35, notes || '',
@@ -363,45 +561,22 @@ app.delete('/api/contacts/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── EQUIPMENT GROUPS ─────────────────────────────────────────────────────────
-
-app.post('/api/jobs/:jobId/groups', (req, res) => {
-  const { name, order_index } = req.body;
-  const info = db.prepare('INSERT INTO groups (job_id, name, order_index) VALUES (?, ?, ?)')
-    .run(Number(req.params.jobId), name, order_index || 0);
-  res.json(db.prepare('SELECT * FROM groups WHERE id = ?').get(info.lastInsertRowid));
-});
-
-app.put('/api/groups/:id', (req, res) => {
-  db.prepare('UPDATE groups SET name=?, order_index=? WHERE id=?')
-    .run(req.body.name, req.body.order_index || 0, Number(req.params.id));
-  res.json(db.prepare('SELECT * FROM groups WHERE id = ?').get(Number(req.params.id)));
-});
-
-app.delete('/api/groups/:id', (req, res) => {
-  db.prepare('DELETE FROM groups WHERE id = ?').run(Number(req.params.id));
-  res.json({ ok: true });
-});
-
 // ─── LINE ITEMS ───────────────────────────────────────────────────────────────
 
-app.get('/api/groups/:groupId/items', (req, res) => {
-  res.json(db.prepare('SELECT * FROM items WHERE group_id = ? ORDER BY id').all(Number(req.params.groupId)));
-});
-
-app.post('/api/groups/:groupId/items', (req, res) => {
+app.post('/api/jobs/:jobId/items', (req, res) => {
   const f = req.body;
   const info = db.prepare(`
-    INSERT INTO items (group_id, drawing, description, qty_per_dwg, pid_number, weeks_lead,
-      qty_ordered, vendor, vendor_part_no, rfq_date, po_number, date_ordered, ship_to,
-      estimated_delivery, received, ship_list, cost, budgeted_cost, dp_percent, down_payment,
-      freight, po_total, status, notes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO items (job_id, section_code, drawing, description, qty_per_dwg, pid_number,
+      weeks_lead, qty_ordered, vendor, vendor_part_no, rfq_date, po_number, date_ordered,
+      ship_to, estimated_delivery, received, ship_list, cost, budgeted_cost, dp_percent,
+      down_payment, freight, po_total, status, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    Number(req.params.groupId), f.drawing || '', f.description || '', f.qty_per_dwg || 1,
-    f.pid_number || '', f.weeks_lead || null, f.qty_ordered || null, f.vendor || '',
-    f.vendor_part_no || '', f.rfq_date || '', f.po_number || '', f.date_ordered || '',
-    f.ship_to || '', f.estimated_delivery || '', f.received ? 1 : 0, f.ship_list || '',
+    Number(req.params.jobId), f.section_code || null,
+    f.drawing || '', f.description || '', f.qty_per_dwg || 1, f.pid_number || '',
+    f.weeks_lead || null, f.qty_ordered || null, f.vendor || '', f.vendor_part_no || '',
+    f.rfq_date || '', f.po_number || '', f.date_ordered || '', f.ship_to || '',
+    f.estimated_delivery || '', f.received ? 1 : 0, f.ship_list || '',
     f.cost || 0, f.budgeted_cost || 0, f.dp_percent || 0, f.down_payment || 0,
     f.freight || 0, f.po_total || 0, f.status || 'not_started', f.notes || '',
     new Date().toISOString()
@@ -413,11 +588,13 @@ app.put('/api/items/:id', (req, res) => {
   const f = req.body;
   const id = Number(req.params.id);
   db.prepare(`
-    UPDATE items SET drawing=?, description=?, qty_per_dwg=?, pid_number=?, weeks_lead=?,
-      qty_ordered=?, vendor=?, vendor_part_no=?, rfq_date=?, po_number=?, date_ordered=?,
-      ship_to=?, estimated_delivery=?, received=?, ship_list=?, cost=?, budgeted_cost=?,
-      dp_percent=?, down_payment=?, freight=?, po_total=?, status=?, notes=? WHERE id=?
+    UPDATE items SET section_code=?, drawing=?, description=?, qty_per_dwg=?, pid_number=?,
+      weeks_lead=?, qty_ordered=?, vendor=?, vendor_part_no=?, rfq_date=?, po_number=?,
+      date_ordered=?, ship_to=?, estimated_delivery=?, received=?, ship_list=?, cost=?,
+      budgeted_cost=?, dp_percent=?, down_payment=?, freight=?, po_total=?, status=?, notes=?
+    WHERE id=?
   `).run(
+    f.section_code || null,
     f.drawing || '', f.description || '', f.qty_per_dwg || 1, f.pid_number || '',
     f.weeks_lead || null, f.qty_ordered || null, f.vendor || '', f.vendor_part_no || '',
     f.rfq_date || '', f.po_number || '', f.date_ordered || '', f.ship_to || '',

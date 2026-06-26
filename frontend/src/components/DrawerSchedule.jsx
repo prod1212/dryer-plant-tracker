@@ -123,11 +123,11 @@ export default function DrawerSchedule({ job }) {
   // ── Timeline range ──────────────────────────────────────────────────────────
   const { minDate, maxDate, months } = useMemo(() => {
     const dates = []
-    job.groups.forEach(g => g.items.forEach(item => {
-      const s = parseDate(item.date_ordered) || parseDate(item.rfq_date)
-      const e = parseDate(item.estimated_delivery)
-      if (s) dates.push(s)
-      if (e) dates.push(e)
+    job.sections.forEach(s => s.items.forEach(item => {
+      const start = parseDate(item.date_ordered) || parseDate(item.rfq_date)
+      const end   = parseDate(item.estimated_delivery)
+      if (start) dates.push(start)
+      if (end)   dates.push(end)
     }))
     if (job.target_delivery) dates.push(parseDate(job.target_delivery))
     if (!dates.length) {
@@ -173,7 +173,7 @@ export default function DrawerSchedule({ job }) {
   }
 
   const jobBarData = useMemo(() => {
-    const bars = job.groups.flatMap(g => g.items.map(itemBar)).filter(Boolean)
+    const bars = job.sections.flatMap(s => s.items.map(itemBar)).filter(Boolean)
     if (!bars.length) return null
     const left  = Math.min(...bars.map(b => b.left))
     const right = Math.max(...bars.map(b => b.left + b.width))
@@ -182,11 +182,11 @@ export default function DrawerSchedule({ job }) {
 
   const jobDateRange = useMemo(() => {
     const dates = []
-    job.groups.forEach(g => g.items.forEach(item => {
-      const s = parseDate(item.date_ordered) || parseDate(item.rfq_date)
-      const e = parseDate(item.estimated_delivery)
-      if (s) dates.push(s)
-      if (e) dates.push(e)
+    job.sections.forEach(s => s.items.forEach(item => {
+      const start = parseDate(item.date_ordered) || parseDate(item.rfq_date)
+      const end   = parseDate(item.estimated_delivery)
+      if (start) dates.push(start)
+      if (end)   dates.push(end)
     }))
     if (!dates.length) return null
     return {
@@ -197,7 +197,7 @@ export default function DrawerSchedule({ job }) {
 
   const criticalItemId = useMemo(() => {
     let latest = null, latestDate = null
-    job.groups.forEach(g => g.items.forEach(item => {
+    job.sections.forEach(s => s.items.forEach(item => {
       const d = parseDate(item.estimated_delivery)
       if (d && (!latestDate || d > latestDate)) { latest = item.id; latestDate = d }
     }))
@@ -244,7 +244,7 @@ export default function DrawerSchedule({ job }) {
     borderBottom: '1px solid var(--border)', transition: 'background 0.1s', flexShrink: 0,
   })
 
-  const noItems = job.groups.every(g => g.items.length === 0)
+  const noItems = job.sections.every(s => s.items.length === 0)
 
   if (noItems) {
     return (
@@ -338,25 +338,25 @@ export default function DrawerSchedule({ job }) {
           style={{ width: 260, flexShrink: 0, borderRight: '1px solid var(--border)', overflowY: 'auto', overflowX: 'hidden', display: 'flex', flexDirection: 'column' }}
           onScroll={onScrollLeft}
         >
-          {job.groups.map(group => {
-            const collapsed = collapsedGroups.has(group.id)
-            const gHov = hoveredGroupId === group.id
+          {job.sections.filter(s => s.items.length > 0).map(section => {
+            const collapsed = collapsedGroups.has(section.code)
+            const gHov = hoveredGroupId === section.code
             return (
-              <div key={group.id} style={{ flexShrink: 0 }}>
+              <div key={section.code} style={{ flexShrink: 0 }}>
                 <div
                   style={groupRow(gHov)}
-                  onMouseEnter={() => setHoveredGroupId(group.id)}
+                  onMouseEnter={() => setHoveredGroupId(section.code)}
                   onMouseLeave={() => setHoveredGroupId(null)}
-                  onClick={() => toggleGroup(group.id)}
+                  onClick={() => toggleGroup(section.code)}
                 >
                   <span style={{ fontSize: 9, color: 'var(--text3)', width: 10 }}>{collapsed ? '▶' : '▼'}</span>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#5DCAA5', flexShrink: 0 }} />
                   <span style={{ fontSize: 12, color: 'var(--text2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {group.name}
+                    {section.name}
                   </span>
-                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>{group.items.length}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>{section.items.length}</span>
                 </div>
-                {!collapsed && group.items.map(item => {
+                {!collapsed && section.items.map(item => {
                   const iHov = hoveredItemId === item.id
                   const isCritical = item.id === criticalItemId
                   return (
@@ -389,28 +389,28 @@ export default function DrawerSchedule({ job }) {
           onScroll={onScrollRight}
         >
           <div style={{ minWidth: 480 }}>
-            {job.groups.map(group => {
-              const collapsed = collapsedGroups.has(group.id)
-              const gBar      = groupBar(group)
-              const gHov      = hoveredGroupId === group.id
+            {job.sections.filter(s => s.items.length > 0).map(section => {
+              const collapsed = collapsedGroups.has(section.code)
+              const gBar      = groupBar(section)
+              const gHov      = hoveredGroupId === section.code
 
-              const gDates = group.items.flatMap(item => {
+              const gDates = section.items.flatMap(item => {
                 const s = parseDate(item.date_ordered) || parseDate(item.rfq_date)
                 const e = parseDate(item.estimated_delivery)
                 return [s, e].filter(Boolean)
               })
               const gTipLines = gDates.length ? [
-                group.name,
-                `${group.items.length} item${group.items.length !== 1 ? 's' : ''}`,
+                section.name,
+                `${section.items.length} item${section.items.length !== 1 ? 's' : ''}`,
                 `${formatDate(new Date(Math.min(...gDates.map(d=>d.getTime()))))} → ${formatDate(new Date(Math.max(...gDates.map(d=>d.getTime()))))}`,
-              ] : [group.name, `${group.items.length} items`]
+              ] : [section.name, `${section.items.length} items`]
 
               return (
-                <div key={group.id} style={{ flexShrink: 0 }}>
+                <div key={section.code} style={{ flexShrink: 0 }}>
                   {/* Group bar row */}
                   <div
                     style={ganttRow(gHov)}
-                    onMouseEnter={() => setHoveredGroupId(group.id)}
+                    onMouseEnter={() => setHoveredGroupId(section.code)}
                     onMouseLeave={() => setHoveredGroupId(null)}
                   >
                     {gridLines}
@@ -432,7 +432,7 @@ export default function DrawerSchedule({ job }) {
                   </div>
 
                   {/* Item bar rows */}
-                  {!collapsed && group.items.map(item => {
+                  {!collapsed && section.items.map(item => {
                     const bar        = itemBar(item)
                     const iHov       = hoveredItemId === item.id
                     const isCritical = item.id === criticalItemId

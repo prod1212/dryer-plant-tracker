@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import Board from './components/Board.jsx'
+import Dashboard from './components/Dashboard.jsx'
 import JobModal from './components/JobModal.jsx'
 import JobDrawer from './components/JobDrawer.jsx'
 import ConfirmModal from './components/ConfirmModal.jsx'
@@ -13,6 +14,7 @@ export default function App() {
   const [editingJob, setEditingJob] = useState(null)
   const [drawerJobId, setDrawerJobId] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
+  const [view, setView] = useState('board') // 'board' | 'dashboard'
 
   const fetchJobs = useCallback(async () => {
     const res = await fetch(`${API}/jobs`)
@@ -75,7 +77,23 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 12, color: 'var(--text3)' }}>{jobs.length} active job{jobs.length !== 1 ? 's' : ''}</span>
+          {/* View toggle */}
+          <div style={{ display: 'flex', background: 'var(--surface2)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)', padding: 3, gap: 2 }}>
+            {[['board', '📋 Board'], ['dashboard', '📊 Dashboard']].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setView(key)}
+                style={{
+                  padding: '4px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+                  borderRadius: 'calc(var(--radius) - 2px)', transition: 'all 0.15s',
+                  background: view === key ? 'var(--accent)' : 'transparent',
+                  color: view === key ? '#000' : 'var(--text3)',
+                }}
+              >{label}</button>
+            ))}
+          </div>
+          <span style={{ fontSize: 12, color: 'var(--text3)' }}>{jobs.length} job{jobs.length !== 1 ? 's' : ''}</span>
           <button className="btn-primary" onClick={() => { setEditingJob(null); setShowJobModal(true) }}>
             + New Job
           </button>
@@ -86,7 +104,7 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text3)' }}>
           Loading...
         </div>
-      ) : (
+      ) : view === 'board' ? (
         <Board
           jobs={jobs}
           onEditJob={handleEditJob}
@@ -94,6 +112,8 @@ export default function App() {
           onRefresh={fetchJobs}
           onOpenDrawer={(job) => setDrawerJobId(job.id)}
         />
+      ) : (
+        <Dashboard />
       )}
 
       {showJobModal && (
