@@ -44,22 +44,26 @@ db.pragma('foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS jobs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_number        TEXT NOT NULL,
-    customer          TEXT DEFAULT '',
-    revision          TEXT DEFAULT '',
-    pcr               TEXT DEFAULT '',
-    project_type      TEXT DEFAULT 'other',
-    job_status        TEXT DEFAULT 'lead',
-    customer_po       TEXT DEFAULT '',
-    project_sell      REAL DEFAULT 0,
-    estimated_install REAL DEFAULT 0,
-    outbound_freight  REAL DEFAULT 0,
-    collected         REAL DEFAULT 0,
-    target_margin     REAL DEFAULT 35,
-    notes             TEXT DEFAULT '',
-    created_at        TEXT,
-    updated_at        TEXT
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_number              TEXT NOT NULL,
+    customer                TEXT DEFAULT '',
+    revision                TEXT DEFAULT '',
+    project_type            TEXT DEFAULT 'other',
+    job_status              TEXT DEFAULT 'lead',
+    customer_po             TEXT DEFAULT '',
+    project_sell            REAL DEFAULT 0,
+    estimated_install       REAL DEFAULT 0,
+    outbound_freight        REAL DEFAULT 0,
+    collected               REAL DEFAULT 0,
+    target_margin           REAL DEFAULT 35,
+    notes                   TEXT DEFAULT '',
+    target_delivery         TEXT DEFAULT '',
+    contract_signed         INTEGER DEFAULT 0,
+    contract_signed_date    TEXT DEFAULT '',
+    customer_po_received    INTEGER DEFAULT 0,
+    customer_po_received_date TEXT DEFAULT '',
+    created_at              TEXT,
+    updated_at              TEXT
   );
 
   CREATE TABLE IF NOT EXISTS groups (
@@ -118,6 +122,22 @@ db.exec(`
   );
 `);
 
+// ─── COLUMN MIGRATIONS (add new columns to existing DB) ──────────────────────
+const existingCols = db.prepare('PRAGMA table_info(jobs)').all().map(c => c.name);
+const newCols = [
+  ['target_delivery',           "TEXT DEFAULT ''"],
+  ['contract_signed',           'INTEGER DEFAULT 0'],
+  ['contract_signed_date',      "TEXT DEFAULT ''"],
+  ['customer_po_received',      'INTEGER DEFAULT 0'],
+  ['customer_po_received_date', "TEXT DEFAULT ''"],
+];
+for (const [col, def] of newCols) {
+  if (!existingCols.includes(col)) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN ${col} ${def}`);
+    console.log(`Added column: jobs.${col}`);
+  }
+}
+
 // ─── MIGRATION FROM tracker.json ─────────────────────────────────────────────
 
 if (fs.existsSync(JSON_PATH)) {
@@ -132,12 +152,12 @@ if (fs.existsSync(JSON_PATH)) {
 
       for (const j of (json.jobs || [])) {
         const info = db.prepare(`
-          INSERT INTO jobs (job_number, customer, revision, pcr, project_type, job_status,
+          INSERT INTO jobs (job_number, customer, revision, project_type, job_status,
             customer_po, project_sell, estimated_install, outbound_freight, collected,
             target_margin, notes, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          j.job_number, j.customer || '', j.revision || '', j.pcr || '',
+          j.job_number, j.customer || '', j.revision || '',
           j.project_type || 'other', j.job_status || 'lead', j.customer_po || '',
           j.project_sell || 0, j.estimated_install || 0, j.outbound_freight || 0,
           j.collected || 0, j.target_margin || 35, j.notes || '',
@@ -208,18 +228,16 @@ if (fs.existsSync(JSON_PATH)) {
 
 const STATUS_WEIGHT = {
   not_started: 0, rfq_sent: 0.15, quote_received: 0.30,
-  po_issued: 0.60, received: 0.90, invoiced: 1.0,
+  po_issued: 0.80, received: 0.92, invoiced: 1.0,
 };
 
 function calcCompletion(items) {
-  if (!items.length) return 0;
+  if (!items.length) return { pct: 0, bucket: 0 };
   const avg = items.reduce((s, i) => s + (STATUS_WEIGHT[i.status] || 0), 0) / items.length;
-  const pct = avg * 100;
-  if (pct === 0) return 0;
-  if (pct < 37.5) return 25;
-  if (pct < 62.5) return 50;
-  if (pct < 87.5) return 75;
-  return 100;
+  const pct = Math.round(avg * 100);
+  // bucket for board column + tag color (0 / 25 / 50 / 75 / 100)
+  const bucket = pct === 100 ? 100 : pct < 13 ? 0 : pct < 38 ? 25 : pct < 63 ? 50 : 75;
+  return { pct, bucket };
 }
 
 function getJobWithStats(jobId) {
@@ -236,6 +254,7 @@ function getJobWithStats(jobId) {
   const milestones = db.prepare('SELECT * FROM milestones WHERE job_id = ? ORDER BY order_index, id').all(jobId);
   const contacts = db.prepare('SELECT * FROM contacts WHERE job_id = ? ORDER BY id').all(jobId);
 
+  const completion = calcCompletion(allItems);
   return {
     ...job,
     groups,
@@ -243,14 +262,15 @@ function getJobWithStats(jobId) {
     contacts,
     stats: {
       totalItems: allItems.length,
-      poCount: allItems.filter(i => i.po_number).length,
+      poCount: allItems.filter(i => ['po_issued','received','invoiced'].includes(i.status)).length,
       receivedCount: allItems.filter(i => i.received).length,
       totalCost: allItems.reduce((s, i) => s + (i.cost || 0), 0),
       totalBudgeted: allItems.reduce((s, i) => s + (i.budgeted_cost || 0), 0),
       totalFreight: allItems.reduce((s, i) => s + (i.freight || 0), 0),
       totalDownPayment: allItems.reduce((s, i) => s + (i.down_payment || 0), 0),
       totalPoTotal: allItems.reduce((s, i) => s + (i.po_total || 0), 0),
-      completion: calcCompletion(allItems),
+      completion: completion.bucket,
+      completionPct: completion.pct,
     },
   };
 }
@@ -264,18 +284,23 @@ app.get('/api/jobs', (req, res) => {
 
 app.post('/api/jobs', (req, res) => {
   const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
-    project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
+    project_sell, estimated_install, outbound_freight, collected, target_margin, notes,
+    target_delivery, contract_signed, contract_signed_date,
+    customer_po_received, customer_po_received_date } = req.body;
   const now = new Date().toISOString();
   const info = db.prepare(`
     INSERT INTO jobs (job_number, customer, revision, pcr, project_type, job_status,
       customer_po, project_sell, estimated_install, outbound_freight, collected,
-      target_margin, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      target_margin, notes, target_delivery, contract_signed, contract_signed_date,
+      customer_po_received, customer_po_received_date, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     job_number, customer || '', revision || '', pcr || '',
     project_type || 'other', job_status || 'lead', customer_po || '',
     project_sell || 0, estimated_install || 0, outbound_freight || 0,
-    collected || 0, target_margin || 35, notes || '', now, now
+    collected || 0, target_margin || 35, notes || '',
+    target_delivery || '', contract_signed ? 1 : 0, contract_signed_date || '',
+    customer_po_received ? 1 : 0, customer_po_received_date || '', now, now
   );
   res.json(getJobWithStats(info.lastInsertRowid));
 });
@@ -289,16 +314,23 @@ app.get('/api/jobs/:id', (req, res) => {
 app.put('/api/jobs/:id', (req, res) => {
   const id = Number(req.params.id);
   const { job_number, customer, revision, pcr, project_type, job_status, customer_po,
-    project_sell, estimated_install, outbound_freight, collected, target_margin, notes } = req.body;
+    project_sell, estimated_install, outbound_freight, collected, target_margin, notes,
+    target_delivery, contract_signed, contract_signed_date,
+    customer_po_received, customer_po_received_date } = req.body;
   db.prepare(`
     UPDATE jobs SET job_number=?, customer=?, revision=?, pcr=?, project_type=?,
       job_status=?, customer_po=?, project_sell=?, estimated_install=?, outbound_freight=?,
-      collected=?, target_margin=?, notes=?, updated_at=? WHERE id=?
+      collected=?, target_margin=?, notes=?, target_delivery=?, contract_signed=?,
+      contract_signed_date=?, customer_po_received=?, customer_po_received_date=?,
+      updated_at=? WHERE id=?
   `).run(
     job_number, customer || '', revision || '', pcr || '',
     project_type || 'other', job_status || 'lead', customer_po || '',
     project_sell || 0, estimated_install || 0, outbound_freight || 0,
-    collected || 0, target_margin || 35, notes || '', new Date().toISOString(), id
+    collected || 0, target_margin || 35, notes || '',
+    target_delivery || '', contract_signed ? 1 : 0, contract_signed_date || '',
+    customer_po_received ? 1 : 0, customer_po_received_date || '',
+    new Date().toISOString(), id
   );
   res.json(getJobWithStats(id));
 });

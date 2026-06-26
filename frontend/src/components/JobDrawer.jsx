@@ -2,8 +2,26 @@ import { useEffect, useState } from 'react'
 import EquipmentGroup from './EquipmentGroup.jsx'
 import GroupModal from './GroupModal.jsx'
 import ItemModal from './ItemModal.jsx'
+import DrawerSchedule from './DrawerSchedule.jsx'
+import ConfirmModal from './ConfirmModal.jsx'
+
+const fmtDate = (str) => {
+  if (!str) return '—'
+  const [y, m, d] = str.split('-').map(Number)
+  if (!y || !m || !d) return '—'
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1] + ' ' + d + ', ' + y
+}
 
 const fmt = (n) => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })
+
+const fmtDateShort = (str) => {
+  if (!str) return null
+  const parts = str.split('-').map(Number)
+  if (parts.length < 3 || parts.some(isNaN)) return null
+  const [y, m, d] = parts
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1] +
+    ' ' + d + ', ' + y
+}
 
 const TYPE_CONFIG = {
   frac_sand:  { label: 'Frac Sand',         color: '#f97316' },
@@ -33,6 +51,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
   const [showGroupModal, setShowGroupModal] = useState(false)
   const [editingGroup, setEditingGroup] = useState(null)
   const [visible, setVisible] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const typeConfig = TYPE_CONFIG[job.project_type] || TYPE_CONFIG.other
   const statusConfig = STATUS_CONFIG[job.job_status] || STATUS_CONFIG.lead
@@ -62,10 +81,11 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
     onRefresh()
   }
 
-  const handleDeleteGroup = async (groupId) => {
-    if (!confirm('Delete this group and all its line items?')) return
-    await fetch(`/api/groups/${groupId}`, { method: 'DELETE' })
-    onRefresh()
+  const handleDeleteGroup = (groupId) => {
+    setPendingDelete({
+      message: 'Delete this group and all its line items?',
+      action: async () => { await fetch(`/api/groups/${groupId}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   return (
@@ -102,7 +122,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
                   background: statusConfig.bg, color: statusConfig.color }}>
                   {statusConfig.label}
                 </span>
-                <span className={`tag tag-${stats.completion}`}>{stats.completion}% Complete</span>
+                <span className={`tag tag-${stats.completion}`}>{stats.completionPct}% Complete</span>
               </div>
               <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', marginTop: 4 }}>{job.customer || '—'}</div>
               {job.revision && (
@@ -119,7 +139,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
           </div>
 
           {/* Stats strip */}
-          <div style={{ display: 'flex', gap: 24, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 24, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)', flexWrap: 'wrap', alignItems: 'flex-start' }}>
             {job.project_sell > 0 && <BigStat label="Sell Price" value={fmt(job.project_sell)} color={typeConfig.color} />}
             {job.customer_po && <BigStat label="Cust PO" value={job.customer_po} />}
             <BigStat label="POs Issued" value={stats.poCount} />
@@ -130,6 +150,29 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
             )}
             {job.estimated_install > 0 && <BigStat label="Est. Install" value={fmt(job.estimated_install)} />}
             {job.outbound_freight > 0 && <BigStat label="Outbound Freight" value={fmt(job.outbound_freight)} />}
+            {/* Gate status */}
+            {isPartsJob ? (
+              <BigStat
+                label="Customer PO"
+                value={job.customer_po_received
+                  ? (fmtDateShort(job.customer_po_received_date) || 'Received')
+                  : 'Pending'}
+                color={job.customer_po_received ? '#059669' : '#B45309'}
+                tooltip={job.customer_po_received ? 'PO received — items can be ordered' : 'Awaiting customer PO — items cannot be ordered yet'}
+              />
+            ) : (
+              <BigStat
+                label="Contract"
+                value={job.contract_signed
+                  ? (fmtDateShort(job.contract_signed_date) || 'Signed')
+                  : 'Pending'}
+                color={job.contract_signed ? '#059669' : '#B45309'}
+                tooltip={job.contract_signed ? 'Contract signed — POs can be released' : 'Contract not yet signed — POs cannot be released'}
+              />
+            )}
+            {job.target_delivery && (
+              <BigStat label="Target Delivery" value={fmtDateShort(job.target_delivery) || job.target_delivery} />
+            )}
           </div>
         </div>
 
@@ -137,6 +180,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
         <div style={{ display: 'flex', background: 'var(--surface)', borderBottom: '1px solid var(--border)', flexShrink: 0, paddingLeft: 24 }}>
           {[
             { key: 'equipment_groups', label: 'Equipment Groups' },
+            { key: 'schedule',         label: 'Schedule' },
             { key: 'contacts',         label: 'Contacts' },
             { key: 'documents',        label: 'Documents' },
           ].map(tab => (
@@ -178,6 +222,7 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
                 </>
           )}
 
+          {activeTab === 'schedule' && <DrawerSchedule job={job} />}
           {activeTab === 'contacts' && <DrawerContacts job={job} onRefresh={onRefresh} />}
           {activeTab === 'documents' && <DrawerDocuments />}
         </div>
@@ -188,6 +233,14 @@ export default function JobDrawer({ job, onClose, onEdit, onDelete, onRefresh })
           group={editingGroup}
           onSave={handleSaveGroup}
           onClose={() => { setShowGroupModal(false); setEditingGroup(null) }}
+        />
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
     </>
@@ -212,6 +265,7 @@ const fmt$ = (n) => n ? '$' + Number(n).toLocaleString('en-US', { maximumFractio
 function DrawerFlatItems({ job, onRefresh }) {
   const [showItemModal, setShowItemModal] = useState(false)
   const [editingItem, setEditingItem] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
   const allItems = job.groups.flatMap(g => g.items)
 
   const ensureGroup = async () => {
@@ -235,10 +289,11 @@ function DrawerFlatItems({ job, onRefresh }) {
     onRefresh()
   }
 
-  const handleDeleteItem = async (itemId) => {
-    if (!confirm('Delete this line item?')) return
-    await fetch(`/api/items/${itemId}`, { method: 'DELETE' })
-    onRefresh()
+  const handleDeleteItem = (itemId) => {
+    setPendingDelete({
+      message: 'Delete this line item?',
+      action: async () => { await fetch(`/api/items/${itemId}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   return (
@@ -259,7 +314,7 @@ function DrawerFlatItems({ job, onRefresh }) {
                 <td style={{ padding: '6px 10px', color: 'var(--text2)', textAlign: 'center' }}>{item.qty_ordered ?? item.qty_per_dwg ?? '—'}</td>
                 <td style={{ padding: '6px 10px', color: 'var(--text2)' }}>{item.vendor || '—'}</td>
                 <td style={{ padding: '6px 10px', color: item.po_number ? 'var(--success)' : 'var(--text3)', fontWeight: item.po_number ? 700 : 400 }}>{item.po_number || '—'}</td>
-                <td style={{ padding: '6px 10px', color: 'var(--text2)' }}>{item.estimated_delivery || '—'}</td>
+                <td style={{ padding: '6px 10px', color: 'var(--text2)' }}>{fmtDate(item.estimated_delivery)}</td>
                 <td style={{ padding: '6px 10px', color: 'var(--accent)', fontWeight: 600, textAlign: 'right' }}>{fmt$(item.cost)}</td>
                 <td style={{ padding: '6px 10px' }}><span className={`status-badge status-${item.status}`}>{STATUS_LABELS[item.status] || item.status}</span></td>
                 <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 14 }}>{item.received ? '✅' : '⬜'}</td>
@@ -281,6 +336,14 @@ function DrawerFlatItems({ job, onRefresh }) {
       {showItemModal && (
         <ItemModal item={editingItem} onSave={handleSaveItem} onClose={() => { setShowItemModal(false); setEditingItem(null) }} />
       )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   )
 }
@@ -289,6 +352,7 @@ function DrawerContacts({ job, onRefresh }) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState({ name: '', role: 'customer', phone: '', email: '' })
+  const [pendingDelete, setPendingDelete] = useState(null)
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
 
   const openAdd = () => { setForm({ name: '', role: 'customer', phone: '', email: '' }); setAdding(true); setEditingId(null) }
@@ -305,10 +369,12 @@ function DrawerContacts({ job, onRefresh }) {
     cancel(); onRefresh()
   }
 
-  const remove = async (id) => {
-    if (!confirm('Remove this contact?')) return
-    await fetch(`/api/contacts/${id}`, { method: 'DELETE' })
-    onRefresh()
+  const remove = (id) => {
+    setPendingDelete({
+      message: 'Remove this contact?',
+      confirmLabel: 'Remove',
+      action: async () => { await fetch(`/api/contacts/${id}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   const contacts = job.contacts || []
@@ -352,6 +418,14 @@ function DrawerContacts({ job, onRefresh }) {
           style={{ marginTop: 4, border: '1px dashed var(--border)', borderRadius: 'var(--radius)', padding: '8px 16px' }}>
           + Add Contact
         </button>
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </div>
   )

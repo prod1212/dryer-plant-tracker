@@ -1,5 +1,13 @@
 import { useState } from 'react'
 import ItemModal from './ItemModal.jsx'
+import ConfirmModal from './ConfirmModal.jsx'
+
+const fmtDate = (str) => {
+  if (!str) return '—'
+  const [y, m, d] = str.split('-').map(Number)
+  if (!y || !m || !d) return '—'
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1] + ' ' + d + ', ' + y
+}
 
 const STATUS_LABELS = {
   not_started: 'Not Started',
@@ -13,9 +21,10 @@ const STATUS_LABELS = {
 const fmt$ = (n) => n ? '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '—'
 
 export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(group.items.length > 0)
   const [showItemModal, setShowItemModal] = useState(false)
   const [editingItem, setEditingItem] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const handleSaveItem = async (data) => {
     if (editingItem) {
@@ -32,10 +41,11 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
     onRefresh()
   }
 
-  const handleDeleteItem = async (itemId) => {
-    if (!confirm('Delete this line item?')) return
-    await fetch(`/api/items/${itemId}`, { method: 'DELETE' })
-    onRefresh()
+  const handleDeleteItem = (itemId) => {
+    setPendingDelete({
+      message: 'Delete this line item?',
+      action: async () => { await fetch(`/api/items/${itemId}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   const totalCost = group.items.reduce((s, i) => s + (i.cost || 0), 0)
@@ -80,7 +90,7 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
                     <td style={{ padding: '5px 8px', color: 'var(--text2)', textAlign: 'center' }}>{item.weeks_lead ?? '—'}</td>
                     <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.vendor || '—'}</td>
                     <td style={{ padding: '5px 8px', color: item.po_number ? 'var(--success)' : 'var(--text3)', fontWeight: item.po_number ? 700 : 400, whiteSpace: 'nowrap' }}>{item.po_number || '—'}</td>
-                    <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>{item.estimated_delivery || '—'}</td>
+                    <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>{fmtDate(item.estimated_delivery)}</td>
                     <td style={{ padding: '5px 8px', color: 'var(--accent)', fontWeight: 600, whiteSpace: 'nowrap', textAlign: 'right' }}>{fmt$(item.cost)}</td>
                     <td style={{ padding: '5px 8px', color: 'var(--text3)', whiteSpace: 'nowrap', textAlign: 'right' }}>{fmt$(item.budgeted_cost)}</td>
                     <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap', textAlign: 'right' }}>{fmt$(item.freight)}</td>
@@ -116,6 +126,14 @@ export default function EquipmentGroup({ group, onEdit, onDelete, onRefresh }) {
           item={editingItem}
           onSave={handleSaveItem}
           onClose={() => { setShowItemModal(false); setEditingItem(null) }}
+        />
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
     </div>

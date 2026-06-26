@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import Board from './components/Board.jsx'
 import JobModal from './components/JobModal.jsx'
 import JobDrawer from './components/JobDrawer.jsx'
+import ConfirmModal from './components/ConfirmModal.jsx'
 
 const API = '/api'
 
@@ -11,6 +12,7 @@ export default function App() {
   const [showJobModal, setShowJobModal] = useState(false)
   const [editingJob, setEditingJob] = useState(null)
   const [drawerJobId, setDrawerJobId] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const fetchJobs = useCallback(async () => {
     const res = await fetch(`${API}/jobs`)
@@ -40,10 +42,15 @@ export default function App() {
     fetchJobs()
   }
 
-  const handleDeleteJob = async (jobId) => {
-    if (!confirm('Delete this job and all its data?')) return
-    await fetch(`${API}/jobs/${jobId}`, { method: 'DELETE' })
-    fetchJobs()
+  const handleDeleteJob = (jobId, onConfirmed) => {
+    setPendingDelete({
+      message: 'Delete this job and all its data? This cannot be undone.',
+      action: async () => {
+        await fetch(`${API}/jobs/${jobId}`, { method: 'DELETE' })
+        fetchJobs()
+        if (onConfirmed) onConfirmed()
+      },
+    })
   }
 
   const handleEditJob = (job) => {
@@ -97,6 +104,15 @@ export default function App() {
         />
       )}
 
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
       {drawerJob && (
         <JobDrawer
           job={drawerJob}
@@ -105,10 +121,7 @@ export default function App() {
             handleEditJob(drawerJob)
             setDrawerJobId(null)
           }}
-          onDelete={() => {
-            handleDeleteJob(drawerJob.id)
-            setDrawerJobId(null)
-          }}
+          onDelete={() => handleDeleteJob(drawerJob.id, () => setDrawerJobId(null))}
           onRefresh={fetchJobs}
         />
       )}

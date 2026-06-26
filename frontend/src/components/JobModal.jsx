@@ -53,11 +53,16 @@ export default function JobModal({ job, onSave, onClose }) {
     customer_po:     job?.customer_po     || '',
     notes:           job?.notes           || '',
     // dashboard-only fields preserved on edit
-    revision:           job?.revision           || '',
-    estimated_install:  job?.estimated_install  || '',
-    outbound_freight:   job?.outbound_freight   || '',
-    collected:          job?.collected          || '',
-    target_margin:      job?.target_margin      ?? 35,
+    revision:                   job?.revision                   || '',
+    estimated_install:          job?.estimated_install          || '',
+    outbound_freight:           job?.outbound_freight           || '',
+    collected:                  job?.collected                  || '',
+    target_margin:              job?.target_margin              ?? 35,
+    target_delivery:            job?.target_delivery            || '',
+    contract_signed:            !!job?.contract_signed,
+    contract_signed_date:       job?.contract_signed_date       || '',
+    customer_po_received:       !!job?.customer_po_received,
+    customer_po_received_date:  job?.customer_po_received_date  || '',
   })
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
@@ -129,6 +134,10 @@ export default function JobModal({ job, onSave, onClose }) {
               <input value={form.revision} onChange={set('revision')} placeholder="e.g. A" />
             </div>
             <div>
+              <label>Target Delivery</label>
+              <input type="date" value={form.target_delivery} onChange={set('target_delivery')} />
+            </div>
+            <div>
               <label>Est. Installation ($)</label>
               <CurrencyInput value={form.estimated_install} onChange={setCurrency('estimated_install')} placeholder="e.g. $25,000" />
             </div>
@@ -140,6 +149,31 @@ export default function JobModal({ job, onSave, onClose }) {
               <label>Collected ($)</label>
               <CurrencyInput value={form.collected} onChange={setCurrency('collected')} placeholder="$0.00" />
             </div>
+          </div>
+
+          {/* Gate fields — shown based on job type */}
+          <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            {/^P/i.test(form.job_number) ? (<>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" id="cpo" checked={form.customer_po_received}
+                  onChange={e => setForm(f => ({ ...f, customer_po_received: e.target.checked }))} />
+                <label htmlFor="cpo" style={{ margin: 0 }}>Customer PO received</label>
+              </div>
+              <div>
+                <label>Customer PO date</label>
+                <input type="date" value={form.customer_po_received_date} onChange={set('customer_po_received_date')} />
+              </div>
+            </>) : (<>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" id="cs" checked={form.contract_signed}
+                  onChange={e => setForm(f => ({ ...f, contract_signed: e.target.checked }))} />
+                <label htmlFor="cs" style={{ margin: 0 }}>Contract signed</label>
+              </div>
+              <div>
+                <label>Contract date</label>
+                <input type="date" value={form.contract_signed_date} onChange={set('contract_signed_date')} />
+              </div>
+            </>)}
           </div>
         </div>
       )}

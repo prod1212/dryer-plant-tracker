@@ -2,6 +2,14 @@ import { useState } from 'react'
 import EquipmentGroup from './EquipmentGroup.jsx'
 import GroupModal from './GroupModal.jsx'
 import ItemModal from './ItemModal.jsx'
+import ConfirmModal from './ConfirmModal.jsx'
+
+const fmtDate = (str) => {
+  if (!str) return '—'
+  const [y, m, d] = str.split('-').map(Number)
+  if (!y || !m || !d) return '—'
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1] + ' ' + d + ', ' + y
+}
 
 const fmt = (n) => n ? '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : '$0'
 
@@ -25,6 +33,7 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
   const [showGroupModal, setShowGroupModal] = useState(false)
   const [editingGroup, setEditingGroup] = useState(null)
   const [activeTab, setActiveTab] = useState('equipment_groups')
+  const [pendingDelete, setPendingDelete] = useState(null)
   const isPartsJob = /^P/i.test(job.job_number)
   const { stats } = job
   const typeConfig = TYPE_CONFIG[job.project_type] || TYPE_CONFIG.other
@@ -47,10 +56,11 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
     onRefresh()
   }
 
-  const handleDeleteGroup = async (groupId) => {
-    if (!confirm('Delete this group and all its line items?')) return
-    await fetch(`/api/groups/${groupId}`, { method: 'DELETE' })
-    onRefresh()
+  const handleDeleteGroup = (groupId) => {
+    setPendingDelete({
+      message: 'Delete this group and all its line items?',
+      action: async () => { await fetch(`/api/groups/${groupId}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   return (
@@ -100,7 +110,7 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 7, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 700, fontSize: 20, color: typeConfig.color, lineHeight: 1 }}>{job.job_number}</span>
-              <span className={`tag tag-${job.stats.completion}`} style={{ fontSize: 10, position: 'relative', top: 2 }}>{job.stats.completion}%</span>
+              <span className={`tag tag-${job.stats.completion}`} style={{ fontSize: 10, position: 'relative', top: 2 }}>{job.stats.completionPct}%</span>
               <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 20,
                 background: statusConfig.bg, color: statusConfig.color, position: 'relative', top: 2 }}>
                 {statusConfig.label}
@@ -196,6 +206,14 @@ export default function JobCard({ job, onEdit, onDelete, onRefresh, onOpenDrawer
           onClose={() => { setShowGroupModal(false); setEditingGroup(null) }}
         />
       )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   )
 }
@@ -271,6 +289,7 @@ const fmt$ = (n) => n ? '$' + Number(n).toLocaleString('en-US', { maximumFractio
 function FlatItemsView({ job, onRefresh }) {
   const [showItemModal, setShowItemModal] = useState(false)
   const [editingItem, setEditingItem] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const allItems = job.groups.flatMap(g => g.items)
 
@@ -300,10 +319,11 @@ function FlatItemsView({ job, onRefresh }) {
     onRefresh()
   }
 
-  const handleDeleteItem = async (itemId) => {
-    if (!confirm('Delete this line item?')) return
-    await fetch(`/api/items/${itemId}`, { method: 'DELETE' })
-    onRefresh()
+  const handleDeleteItem = (itemId) => {
+    setPendingDelete({
+      message: 'Delete this line item?',
+      action: async () => { await fetch(`/api/items/${itemId}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   return (
@@ -325,7 +345,7 @@ function FlatItemsView({ job, onRefresh }) {
                   <td style={{ padding: '5px 8px', color: 'var(--text2)', textAlign: 'center' }}>{item.qty_ordered ?? item.qty_per_dwg ?? '—'}</td>
                   <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.vendor || '—'}</td>
                   <td style={{ padding: '5px 8px', color: item.po_number ? 'var(--success)' : 'var(--text3)', fontWeight: item.po_number ? 700 : 400, whiteSpace: 'nowrap' }}>{item.po_number || '—'}</td>
-                  <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>{item.estimated_delivery || '—'}</td>
+                  <td style={{ padding: '5px 8px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>{fmtDate(item.estimated_delivery)}</td>
                   <td style={{ padding: '5px 8px', color: 'var(--accent)', fontWeight: 600, whiteSpace: 'nowrap', textAlign: 'right' }}>{fmt$(item.cost)}</td>
                   <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>
                     <span className={`status-badge status-${item.status}`}>{STATUS_LABELS[item.status] || item.status}</span>
@@ -360,6 +380,14 @@ function FlatItemsView({ job, onRefresh }) {
           onClose={() => { setShowItemModal(false); setEditingItem(null) }}
         />
       )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   )
 }
@@ -376,6 +404,7 @@ function ContactsTab({ job, onRefresh }) {
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [form, setForm] = useState({ name: '', role: 'customer', phone: '', email: '' })
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
 
@@ -394,10 +423,12 @@ function ContactsTab({ job, onRefresh }) {
     onRefresh()
   }
 
-  const remove = async (id) => {
-    if (!confirm('Remove this contact?')) return
-    await fetch(`/api/contacts/${id}`, { method: 'DELETE' })
-    onRefresh()
+  const remove = (id) => {
+    setPendingDelete({
+      message: 'Remove this contact?',
+      confirmLabel: 'Remove',
+      action: async () => { await fetch(`/api/contacts/${id}`, { method: 'DELETE' }); onRefresh() },
+    })
   }
 
   const contacts = job.contacts || []
@@ -446,6 +477,14 @@ function ContactsTab({ job, onRefresh }) {
           style={{ marginTop: 4, width: '100%', border: '1px dashed var(--border)', borderRadius: 'var(--radius)' }}>
           + Add Contact
         </button>
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          message={pendingDelete.message}
+          confirmLabel={pendingDelete.confirmLabel}
+          onConfirm={async () => { await pendingDelete.action(); setPendingDelete(null) }}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </div>
   )
